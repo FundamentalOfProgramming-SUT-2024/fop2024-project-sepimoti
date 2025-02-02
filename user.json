@@ -1,0 +1,13 @@
+{
+	"users":	[{
+			"name":	"SepiMoti",
+			"email":	"sepehr@gmail.com",
+			"password":	"Sepehr1385",
+			"score":	0,
+			"settings":	{
+				"hero_color":	"red",
+				"difficulty":	"normal"
+			}
+		}],
+	"last_user":	"SepiMoti"
+}
