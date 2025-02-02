@@ -16,13 +16,18 @@ User current_user;
 typedef struct {
     int y, x;
     char side; // 'u': up / 'd': down / 'r': right / 'l': left
-} Door;
+    int value; // For gold
+} Object;
 
 typedef struct {
     int y, x; // Top Left position
     int width, height;
-    Door doors[8];
+    Object doors[8];
     int door_count;
+    Object pillars[9];
+    int pillar_count;
+    Object gold[4];
+    int gold_count;
     char kind[30];
 } Room;
 
@@ -49,6 +54,8 @@ typedef struct {
     attr_t attributes;
     int y, x;
     int level;
+    int health;
+    int gold;
 } Character;
 Character hero;
 Character previous;
@@ -233,7 +240,7 @@ int main_menu()
 
     // Footer
     attron(COLOR_PAIR(1) | A_BOLD);
-    const char *footer = "Created by: SepiMoti | Version: 1.0";
+    const char *footer = "Created by: SepiMoti | Version: 2.0.0";
     mvaddstr(HEIGHT - 1, (WIDTH - strlen(footer)) / 2, footer);
     attroff(COLOR_PAIR(1) | A_BOLD);
 
@@ -917,7 +924,9 @@ void random_room_generator(Region *region) {
 
     region->room->door_count = 0;
 
-    // strcpy(region->room->kind, "start");
+    region->room->pillar_count = 0;
+
+    region->room->gold_count = 0;
 }
 
 void initialize_regions() {
@@ -995,7 +1004,7 @@ void draw_corridors(Room *room1, Room *room2) {
     int position1 = find_region(room1);
     int position2 = find_region(room2);
 
-    Door door1, door2;
+    Object door1, door2;
 
     if ((position1 % HORIZENTAL) == (position2 % HORIZENTAL)) {
         // If two rooms are in same column they'll be connected on their up and down sides
@@ -1152,6 +1161,53 @@ void connect_all_rooms() {
     }
 }
 
+int is_there_object(int y, int x, char* symbol) {
+    if (!strcmp(screen[y - 1][x].symbol, symbol) && !screen[y - 1][x].condition) return 1;
+    if (!strcmp(screen[y][x + 1].symbol, symbol) && !screen[y][x + 1].condition) return 2;
+    if (!strcmp(screen[y + 1][x].symbol, symbol) && !screen[y + 1][x].condition) return 3;
+    if (!strcmp(screen[y][x - 1].symbol, symbol) && !screen[y][x - 1].condition) return 4;
+    return 0;
+}
+
+void add_room_stuff(Room* room) {
+    // Add pillars
+    int b = (room->height - 4) / 3;
+    int a = (room->width  - 4) / 3;
+    for (int i = 0; i < b; i++) {
+        for (int j = 0; j < a; j++) {
+            if ((rand() % 3) == 0) {
+                int* index = &room->pillar_count;
+                room->pillars[*index].y = (room->y + 1 + (3 * i)) + rand() % 3;
+                room->pillars[*index].x = (room->x + 1 + (3 * j)) + rand() % 3;
+                (*index)++;
+            }
+        }
+    }
+    
+    // Add gold
+    int chance = rand() % 4;
+    while (chance != 0) {
+        int y = (room->y + 1) + rand() % (room->height - 2);
+        int x = (room->x + 1) + rand() % (room->width  - 2);
+
+        int conflict = 0;
+        for (int i = 0; i < room->pillar_count; i++) {
+            if ((room->pillars[i].y == y) && (room->pillars[i].x == x)) {
+                conflict = 1;
+            }
+        }
+
+        if (!conflict) {
+            room->gold[room->gold_count].y = y;
+            room->gold[room->gold_count].x = x;
+            room->gold[room->gold_count].value = 20 + 5 * (rand() % 5);
+            room->gold_count++;
+
+            chance--;
+        }
+    }
+}
+
 void set_room_index(int y, int x, char* symbol, attr_t attribute) {
     strcpy(screen[y][x].symbol, symbol);
     screen[y][x].attributes = attribute;
@@ -1163,7 +1219,6 @@ void set_room(Room *room) {
     int width = room->width;
     int height = room->height;
 
-    // Walls and Corners
     attr_t color;
     if (!strcmp(room->kind, "start")) 
         color = COLOR_PAIR(6);
@@ -1172,6 +1227,7 @@ void set_room(Room *room) {
     else
         color = COLOR_PAIR(3);
 
+    // Walls and Corners
     set_room_index(y, x, "╔", color);
     set_room_index(y, x + width - 1, "╗", color);
     set_room_index(y + height - 1, x, "╚", color);
@@ -1194,69 +1250,28 @@ void set_room(Room *room) {
             set_room_index(i, j, ".", COLOR_PAIR(5));
         }
     }
+
+    // Pillar
+    for (int i = 0; i < room->pillar_count; i++) {
+        set_room_index(room->pillars[i].y, room->pillars[i].x, "■", color);
+    }
+
+    // Gold
+    for (int i = 0; i < room->gold_count; i++) {
+        set_room_index(room->gold[i].y, room->gold[i].x, "🜚", COLOR_PAIR(3) | A_BOLD);
+    }
 }
 
 void draw_room(Room *room) {
-    int x = room->x;
-    int y = room->y;
-    int width = room->width;
-    int height = room->height;
+    for (int y = room->y; y < room->y + room->height; y++) {
+        for (int x = room->x; x < room->x + room->width; x++) {
+            attron(screen[y][x].attributes);
+            mvprintw(y, x , "%s", screen[y][x].symbol);
+            attroff(screen[y][x].attributes);
 
-    if (!strcmp(room->kind, "start"))
-        attron(COLOR_PAIR(6));
-    else if(!strcmp(room->kind, "stair"))
-        attron(COLOR_PAIR(5));
-    else
-        attron(COLOR_PAIR(3));
-
-    mvprintw(y, x, "╔");
-    screen[y][x].condition = 1;
-
-    mvprintw(y, x + width - 1, "╗");
-    screen[y][x + width - 1].condition = 1;
-
-    mvprintw(y + height - 1, x, "╚");
-    screen[y + height - 1][x].condition = 1;
-
-    mvprintw(y + height - 1, x + width - 1, "╝");
-    screen[y + height - 1][x + width - 1].condition = 1;
-
-    for (int i = x + 1; i < x + width - 1; i++) {
-        mvprintw(y, i, "═");
-        screen[y][i].condition = 1;
-
-        mvprintw(y + height - 1, i, "═");
-        screen[y + height - 1][i].condition = 1;
-    }
-    for (int i = y + 1; i < y + height - 1; i++) {
-        mvprintw(i, x, "║");
-        screen[i][x].condition = 1;
-
-        mvprintw(i, x + width - 1, "║");
-        screen[i][x + width - 1].condition = 1;
-    }
-
-    for (int i = 0; i < room->door_count; i++) {
-        mvprintw(room->doors[i].y, room->doors[i].x, "╬");
-        screen[room->doors[i].y][room->doors[i].x].condition = 1;
-    }
-
-    if (!strcmp(room->kind, "start"))
-        attroff(COLOR_PAIR(6));
-    else if (room->kind, "stair")
-        attroff(COLOR_PAIR(5));
-    else
-        attroff(COLOR_PAIR(3));
-    
-
-    attron(COLOR_PAIR(5));
-    for (int i = y + 1; i < y + height - 1; i++) {
-        for (int j = x + 1; j < x + width - 1; j++) {
-            mvprintw(i, j, ".");
-            screen[i][j].condition = 1;
+            screen[y][x].condition = 1;
         }
     }
-    attroff(COLOR_PAIR(5));
     
     refresh();
 }
@@ -1285,8 +1300,12 @@ void init_hero() {
     Region start = regions[start_region / HORIZENTAL][start_region % HORIZENTAL];
     hero.y = start.room->y + 1;
     hero.x = start.room->x + 1;
+    // This code added to avoid confilct between hero and pillar
+    if (!strcmp(screen[hero.y][hero.x].symbol, "■")) hero.y++;
 
     hero.level = 0;
+    hero.health = 100;
+    hero.gold = 0;
 
     // Set previous location of hero
     strcpy(previous.symbol, ".");
@@ -1299,12 +1318,53 @@ void init_hero() {
     attron(hero.attributes);
     mvprintw(hero.y, hero.x, "%s", hero.symbol);
     attroff(hero.attributes);
+    refresh();
+}
+
+void show_health() {
+    attron(COLOR_PAIR(3) | A_BOLD);
+    mvprintw(2, 3, "HEALTH: ");
+    attroff(COLOR_PAIR(3) | A_BOLD);
+
+    attron(COLOR_PAIR(4));
+    int health_bar = (hero.health % 10 == 0) ? (hero.health / 10) : ((int)(hero.health / 10) + 1);
+    for (int i = 0; i < health_bar; i++) {
+        printw("\u2665 ");
+    }
+    for (int i = health_bar; i < 10; i++) {
+        printw("\u2661 ");
+    }
+    printw("%d", hero.health);
+    attroff(COLOR_PAIR(4));
+}
+
+void show_gold() {
+    attron(COLOR_PAIR(3) | A_BOLD);
+    mvprintw(2, 37, "GOLD: ");
+    attroff(COLOR_PAIR(3) | A_BOLD);
+
+    attron(COLOR_PAIR(5));
+    printw("%d", hero.gold);
+    attroff(COLOR_PAIR(5));
+}
+
+void guide() {
+    show_health();
+
+    attron(COLOR_PAIR(3) | A_BOLD);
+    printw(" ┇ ");
+    attroff(COLOR_PAIR(3) | A_BOLD);
+
+    show_gold();
+
+    refresh();
 }
 
 int is_walkable(int y, int x) {
     if (screen[y][x].symbol[0] == '\0') return 0;
 
-    return (strcmp(screen[y][x].symbol, "║") && strcmp(screen[y][x].symbol, "═")
+    return (strcmp(screen[y][x].symbol, "■")
+         && strcmp(screen[y][x].symbol, "║") && strcmp(screen[y][x].symbol, "═")
          && strcmp(screen[y][x].symbol, "╔") && strcmp(screen[y][x].symbol, "╗")
          && strcmp(screen[y][x].symbol, "╝") && strcmp(screen[y][x].symbol, "╚"));
 }
@@ -1334,14 +1394,6 @@ void update_previous(int new_y, int new_x) {
     screen[hero.y][hero.x].condition = 1;
 
     refresh();
-}
-
-int is_there_corridor(int y, int x) {
-    if (!strcmp(screen[y - 1][x].symbol, "░")      && !screen[y - 1][x].condition) return 1;
-    else if (!strcmp(screen[y][x + 1].symbol, "░") && !screen[y][x + 1].condition) return 2;
-    else if (!strcmp(screen[y + 1][x].symbol, "░") && !screen[y + 1][x].condition) return 3;
-    else if (!strcmp(screen[y][x - 1].symbol, "░") && !screen[y][x - 1].condition) return 4;
-    return 0;
 }
 
 void move_player() {
@@ -1387,8 +1439,28 @@ void move_player() {
         if (is_walkable(new_y, new_x)) {
             update_previous(new_y, new_x);
 
+            // Earn gold
+            if (!strcmp(previous.symbol, "🜚")) {
+                int reg = find_region_by_coordinate(new_y, new_x);
+                Room* room = regions[reg / HORIZENTAL][reg % HORIZENTAL].room;
+                for (int i = 0; i < room->gold_count; i++) {
+                    if ((room->gold[i].y == previous.y) && (room->gold[i].x == previous.x)) {
+                        char message[50];
+                        sprintf(message, "You've earned %d golds!", room->gold[i].value);
+                        show_message(message);
+
+                        hero.gold += room->gold[i].value;
+                        show_gold();
+
+                        strcpy(previous.symbol, ".");
+                        previous.attributes = COLOR_PAIR(5);
+                        set_room_index(previous.y, previous.x, ".", COLOR_PAIR(5));
+                    }
+                }
+            }
+
             // Show corridor
-            int cor = is_there_corridor(hero.y, hero.x);
+            int cor = is_there_object(hero.y, hero.x, "░");
             switch (cor) {
             case 1:
                 mvprintw(hero.y - 1, hero.x, "░");
@@ -1440,6 +1512,8 @@ void new_game() {
     for (int i = 0; i < VERTICAL; i++) {
         for (int j = 0; j < HORIZENTAL; j++) {
             if (regions[i][j].room != NULL) {
+                add_room_stuff(regions[i][j].room);
+
                 set_room(regions[i][j].room);
 
                 if (!strcmp(regions[i][j].room->kind, "start")) {
@@ -1450,6 +1524,8 @@ void new_game() {
     }
 
     init_hero();
+    guide();
+
     move_player();
 }
 
