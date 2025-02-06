@@ -4,9 +4,9 @@
 #include <ctype.h>
 #include <locale.h>
 #include <time.h>
+#include <unistd.h>
 #include <math.h>
 #include <ncursesw/curses.h>
-#include <wchar.h>
 #include "user.h"
 
 const char *user_file_name = "user.json";
@@ -14,21 +14,28 @@ User current_user;
 
 
 typedef struct {
-    int y, x;
-    char side; // 'u': up / 'd': down / 'r': right / 'l': left
-    int value; // For gold
-} Object;
+    char symbol[6];
+    attr_t attributes;
+    int y, x;  // Used for hero
+    int value; // Used for rooms
+} Character;
 
 typedef struct {
+    char name[25];
+    Character character;
+    int health;
+    int damage;
+    int can_follow;
+    Character previous;
+} Monster;
+
+typedef struct {
+    char kind[30];
     int y, x; // Top Left position
     int width, height;
-    Object doors[8];
-    int door_count;
-    Object pillars[9];
-    int pillar_count;
-    Object gold[4];
-    int gold_count;
-    char kind[30];
+    Character** map;
+    Monster monsters[5];
+    int monster_count;
 } Room;
 
 typedef struct {
@@ -48,18 +55,33 @@ const int HORIZENTAL = 4, VERTICAL = 3;
 Region regions[3][4]; // Divide screen into 12 regions
 int start_region;
 
+typedef struct {
+    int value;
+    int number;
+    int first_consume; // For magic/supreme food and potions
+} Resource;
 
 typedef struct {
-    char symbol[6];
-    attr_t attributes;
-    int y, x;
+    Resource foods[3];   // 0: normal or rotten | 1: magic | 2: supreme
+    Resource weapons[5]; // 0: mace | 1: dagger | 2: wand  | 3: arrow | 4: sword
+    int which_weapon;
+    Resource potions[3]; // 0: health | 1: speed | 2: damage
+} Inventory;
+
+typedef struct {
+    Character character;
+    Inventory inventory;
+    int walk;
     int level;
     int health;
+    int hunger;
     int gold;
-} Character;
-Character hero;
+    int healing_speed;
+    int speed;
+    int base_power;
+} Hero;
+Hero hero;
 Character previous;
-
 
 typedef struct {
     char symbol[6];
@@ -134,8 +156,7 @@ void show_error(int y, int x, const char *message)
     refresh();
 }
 
-void show_logo(int which)
-{
+void show_logo(int which){
     attron(COLOR_PAIR(3));
     const char *rogue[] = {
         "██████╗  ██████╗  ██████╗ ██╗   ██╗███████╗",
@@ -151,38 +172,69 @@ void show_logo(int which)
         "██║ █╗ ██║█████╗  ██║     ██║     ██║   ██║██╔████╔██║█████╗",
         "██║███╗██║██╔══╝  ██║     ██║     ██║   ██║██║╚██╔╝██║██╔══╝",
         "╚███╔███╔╝███████╗███████╗╚██████╗╚██████╔╝██║ ╚═╝ ██║███████╗",
-        " ╚══╝╚══╝ ╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚══════╝"};
+        " ╚══╝╚══╝ ╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚══════╝"
+    };
     const char *settings[] = {
         "███████╗███████╗████████╗████████╗██╗███╗   ██╗ ██████╗ ███████╗",
         "██╔════╝██╔════╝╚══██╔══╝╚══██╔══╝██║████╗  ██║██╔════╝ ██╔════╝",
         "███████╗█████╗     ██║      ██║   ██║██╔██╗ ██║██║  ███╗███████╗",
         "╚════██║██╔══╝     ██║      ██║   ██║██║╚██╗██║██║   ██║╚════██║",
         "███████║███████╗   ██║      ██║   ██║██║ ╚████║╚██████╔╝███████║",
-        "╚══════╝╚══════╝   ╚═╝      ╚═╝   ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝"};
+        "╚══════╝╚══════╝   ╚═╝      ╚═╝   ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝"
+    };
+    const char *game_over[] = {
+        "  ▄████  ▄▄▄       ███▄ ▄███▓▓█████     ▒█████   ██▒   █▓▓█████  ██▀███  ",
+        " ██▒ ▀█▒▒████▄    ▓██▒▀█▀ ██▒▓█   ▀    ▒██▒  ██▒▓██░   █▒▓█   ▀ ▓██ ▒ ██▒",
+        "▒██░▄▄▄░▒██  ▀█▄  ▓██    ▓██░▒███      ▒██░  ██▒ ▓██  █▒░▒███   ▓██ ░▄█ ▒",
+        "░▓█  ██▓░██▄▄▄▄██ ▒██    ▒██ ▒▓█  ▄    ▒██   ██░  ▒██ █░░▒▓█  ▄ ▒██▀▀█▄  ",
+        "░▒▓███▀▒ ▓█   ▓██▒▒██▒   ░██▒░▒████▒   ░ ████▓▒░   ▒▀█░  ░▒████▒░██▓ ▒██▒",
+        " ░▒   ▒  ▒▒   ▓▒█░░ ▒░   ░  ░░░ ▒░ ░   ░ ▒░▒░▒░    ░ ▐░  ░░ ▒░ ░░ ▒▓ ░▒▓░",
+        "  ░   ░   ▒   ▒▒ ░░  ░      ░ ░ ░  ░     ░ ▒ ▒░    ░ ░░   ░ ░  ░  ░▒ ░ ▒░",
+        "░ ░   ░   ░   ▒   ░      ░      ░      ░ ░ ░ ▒       ░░     ░     ░░   ░ ",
+        "      ░       ░  ░       ░      ░  ░       ░ ░        ░     ░  ░   ░     ",
+        "                                                     ░                   "
+    };
+    const char *won[] = {
+        "██    ██  ██████  ██    ██     ██     ██  ██████  ███    ██",
+        " ██  ██  ██    ██ ██    ██     ██     ██ ██    ██ ████   ██",
+        "  ████   ██    ██ ██    ██     ██  █  ██ ██    ██ ██ ██  ██",
+        "   ██    ██    ██ ██    ██     ██ ███ ██ ██    ██ ██  ██ ██",
+        "   ██     ██████   ██████       ███ ███   ██████  ██   ████"
+    };
 
-    if (which == 0)
-    {
-        for (int i = 0; i < 6; i++)
-        {
+    if (which == 0) {
+        for (int i = 0; i < 6; i++) {
             mvprintw(2 + i, (WIDTH - 43) / 2, "%s", rogue[i]);
         }
     }
-    else if (which == 1)
-    {
-        for (int i = 0; i < 6; i++)
-        {
+    else if (which == 1) {
+        for (int i = 0; i < 6; i++) {
             mvprintw(2 + i, (WIDTH - 62) / 2, "%s", welcome[i]);
         }
     }
-    else if (which == 2)
-    {
-        for (int i = 0; i < 6; i++)
-        {
+    else if (which == 2) {
+        for (int i = 0; i < 6; i++) {
             mvprintw(2 + i, (WIDTH - 64) / 2, "%s", settings[i]);
         }
     }
 
     attroff(COLOR_PAIR(3));
+
+    if (which == 3) {
+        attron(COLOR_PAIR(4));
+        for (int i = 0; i < 10; i++) {
+            mvprintw(2 + i, (WIDTH - 73) / 2, "%s", game_over[i]);
+        }
+        attroff(COLOR_PAIR(4));
+    }
+
+    if (which == 4) {
+        attron(COLOR_PAIR(5));
+        for (int i = 0; i < 5; i++) {
+            mvprintw(2 + i, (WIDTH - 59) / 2, "%s", won[i]);
+        }
+        attroff(COLOR_PAIR(5));
+    }
 }
 
 int change_menu(const char *menu[], int len, int y, int x, int which_menu)
@@ -913,6 +965,9 @@ void room_condition_maker(int has_room[VERTICAL][HORIZENTAL]) {
 }
 
 void random_room_generator(Region *region) {
+    // The rooms are normal by default
+    strcpy(region->room->kind, "normal");
+    
     int height = region->final_y - region->first_y + 1;
     int width = region->final_x - region->first_x + 1;
 
@@ -922,11 +977,13 @@ void random_room_generator(Region *region) {
     region->room->x = region->first_x + rand() % (width - 6 + 1);
     region->room->width = 6 + rand() % (region->final_x - region->room->x - 6 + 2);
 
-    region->room->door_count = 0;
+    // Build the room map
+    region->room->map = (Character **)malloc(region->room->height * sizeof(Character *));
+    for (int i = 0; i < region->room->height; i++) {
+        region->room->map[i] = (Character *)calloc(region->room->width, sizeof(Character));
+    }
 
-    region->room->pillar_count = 0;
-
-    region->room->gold_count = 0;
+    region->room->monster_count = 0;
 }
 
 void initialize_regions() {
@@ -953,46 +1010,13 @@ void initialize_regions() {
         }
     }
 
-    int start = rand() % 4;
-    int a, b;
-    switch (start) {
-    case 0:
-        a = (regions[0][0].room != NULL) ? 0 : 1;
-        strcpy(regions[0][a].room->kind, "start");
+    int a = (regions[0][0].room != NULL) ? 0 : 1;
+    strcpy(regions[0][a].room->kind, "start");
 
-        b = (regions[2][2].room != NULL) ? 2 : 3;
-        strcpy(regions[2][b].room->kind, "stair");
+    int b = (regions[2][2].room != NULL) ? 2 : 3;
+    strcpy(regions[2][b].room->kind, "stair");
 
-        start_region = a;
-        break;
-    case 1:
-        a = (regions[0][2].room != NULL) ? 2 : 3;
-        strcpy(regions[0][a].room->kind, "start");
-
-        b = (regions[2][0].room != NULL) ? 0 : 1;
-        strcpy(regions[2][b].room->kind, "stair");
-
-        start_region = a;
-        break;
-    case 2:
-        a = (regions[2][0].room != NULL) ? 0 : 1;
-        strcpy(regions[2][a].room->kind, "start");
-
-        b = (regions[0][2].room != NULL) ? 2 : 3;
-        strcpy(regions[0][b].room->kind, "stair");
-
-        start_region = 8 + a;
-        break;
-    case 3:
-        a = (regions[2][2].room != NULL) ? 2 : 3;
-        strcpy(regions[2][a].room->kind, "start");
-
-        b = (regions[0][0].room != NULL) ? 0 : 1;
-        strcpy(regions[0][b].room->kind, "stair");
-
-        start_region = 8 + a;
-        break;
-    }
+    start_region = a;
 }
 
 void set_cor(int y, int x) {
@@ -1004,35 +1028,34 @@ void draw_corridors(Room *room1, Room *room2) {
     int position1 = find_region(room1);
     int position2 = find_region(room2);
 
-    Object door1, door2;
+    int y1, x1; // Position of the door 1 in the screen
+    int y2, x2; // Position of the door 2 in the screen
 
     if ((position1 % HORIZENTAL) == (position2 % HORIZENTAL)) {
         // If two rooms are in same column they'll be connected on their up and down sides
-        door1.y = (position1 < position2) ? (room1->y + room1->height - 1) : (room1->y);
-        door1.x = (room1->x + 1) + rand() % (room1->width - 2);
-        door1.side = (position1 < position2) ? 'd' : 'u';
+        y1 = (position1 < position2) ? (room1->y + room1->height - 1) : (room1->y);
+        x1 = (room1->x + 1) + rand() % (room1->width - 2);
 
-        door2.y = (position1 < position2) ? room2->y : (room2->y + room2->height - 1);
-        door2.x = (room2->x + 1) + rand() % (room2->width - 2);
-        door2.side = (position1 < position2) ? 'u' : 'd';
+        y2 = (position1 < position2) ? room2->y : (room2->y + room2->height - 1);
+        x2 = (room2->x + 1) + rand() % (room2->width - 2);
 
-        int max_y = (door1.y > door2.y) ? door1.y : door2.y;
-        int min_y = (door1.y > door2.y) ? door2.y : door1.y;
+        int max_y = (y1 > y2) ? y1 : y2;
+        int min_y = (y1 > y2) ? y2 : y1;
 
-        int max_x = (door1.x > door2.x) ? door1.x : door2.x;
-        int min_x = (door1.x > door2.x) ? door2.x : door1.x;
+        int max_x = (x1 > x2) ? x1 : x2;
+        int min_x = (x1 > x2) ? x2 : x1;
 
         for (int y = min_y; y <= (min_y + (max_y - min_y) / 2); y++) {
-            if (door1.y < door2.y)
-                set_cor(y, door1.x);
+            if (y1 < y2)
+                set_cor(y, x1);
             else
-                set_cor(y, door2.x);
+                set_cor(y, x2);
         }
         for (int y = (min_y + (max_y - min_y) / 2); y <= max_y; y++) {
-            if (door1.y < door2.y)
-                set_cor(y, door2.x);
+            if (y1 < y2)
+                set_cor(y, x2);
             else
-                set_cor(y, door1.x);
+                set_cor(y, x1);
         }
         for (int x = min_x; x <= max_x; x++) {
             set_cor((min_y + (max_y - min_y) / 2), x);
@@ -1040,59 +1063,55 @@ void draw_corridors(Room *room1, Room *room2) {
     }
     else if ((position1 / HORIZENTAL) == (position2 / HORIZENTAL)) {
         // If two rooms are in same row they'll be connected on their right and left sides
-        door1.y = (room1->y + 1) + rand() % (room1->height - 2);
-        door1.x = (position1 < position2) ? (room1->x + room1->width - 1) : room1->x;
-        door1.side = (position1 < position2) ? 'r' : 'l';
+        y1 = (room1->y + 1) + rand() % (room1->height - 2);
+        x1 = (position1 < position2) ? (room1->x + room1->width - 1) : room1->x;
 
-        door2.y = (room2->y + 1) + rand() % (room2->height - 2);
-        door2.x = (position1 < position2) ? room2->x : (room2->x + room2->width - 1);
-        door2.side = (position1 < position2) ? 'l' : 'r';
+        y2 = (room2->y + 1) + rand() % (room2->height - 2);
+        x2 = (position1 < position2) ? room2->x : (room2->x + room2->width - 1);
 
-        int max_y = (door1.y > door2.y) ? door1.y : door2.y;
-        int min_y = (door1.y > door2.y) ? door2.y : door1.y;
+        int max_y = (y1 > y2) ? y1 : y2;
+        int min_y = (y1 > y2) ? y2 : y1;
 
-        int max_x = (door1.x > door2.x) ? door1.x : door2.x;
-        int min_x = (door1.x > door2.x) ? door2.x : door1.x;
+        int max_x = (x1 > x2) ? x1 : x2;
+        int min_x = (x1 > x2) ? x2 : x1;
 
         for (int x = min_x; x <= (min_x + (max_x - min_x) / 2); x++) {
-            if (door1.x < door2.x)
-                set_cor(door1.y, x);
+            if (x1 < x2)
+                set_cor(y1, x);
             else
-                set_cor(door2.y, x);
+                set_cor(y2, x);
         }
         for (int x = (min_x + (max_x - min_x) / 2); x <= max_x; x++) {
-            if (door1.x < door2.x)
-                set_cor(door2.y, x);
+            if (x1 < x2)
+                set_cor(y2, x);
             else
-                set_cor(door1.y, x);
+                set_cor(y1, x);
         }
         for (int y = min_y; y <= max_y; y++) {
             set_cor(y, (min_x + (max_x - min_x) / 2));
         }
     }
     else {
-        door1.x = (room1->x < room2->x) ? (room1->x + room1->width - 1) : (room1->x);
-        door1.y = (room1->y + 1) + rand() % (room1->height - 2);
-        door1.side = (room1->x < room2->x) ? 'r' : 'l';
+        x1 = (room1->x < room2->x) ? (room1->x + room1->width - 1) : (room1->x);
+        y1 = (room1->y + 1) + rand() % (room1->height - 2);
 
-        door2.x = (room2->x + 1) + rand() % (room2->width - 2);
-        door2.y = (room1->y < room2->y) ? (room2->y) : (room2->y + room2->height - 1);
-        door2.side = (room1->x < room2->x) ? 'u' : 'd';
+        x2 = (room2->x + 1) + rand() % (room2->width - 2);
+        y2 = (room1->y < room2->y) ? (room2->y) : (room2->y + room2->height - 1);
 
-        int min_x = door1.x < door2.x ? door1.x : door2.x;
-        int max_x = door1.x > door2.x ? door1.x : door2.x;
+        int min_x = x1 < x2 ? x1 : x2;
+        int max_x = x1 > x2 ? x1 : x2;
         for (int x = min_x; x <= max_x; x++) {
-            set_cor(door1.y, x);
+            set_cor(y1, x);
         }
-        int min_y = door1.y < door2.y ? door1.y : door2.y;
-        int max_y = door1.y > door2.y ? door1.y : door2.y;
+        int min_y = y1 < y2 ? y1 : y2;
+        int max_y = y1 > y2 ? y1 : y2;
         for (int y = min_y; y <= max_y; y++) {
-            set_cor(y, door2.x);
+            set_cor(y, x2);
         }
     }
 
-    room1->doors[room1->door_count++] = door1;
-    room2->doors[room2->door_count++] = door2;
+    strcpy(room1->map[y1 - room1->y][x1 - room1->x].symbol, "╬");
+    strcpy(room2->map[y2 - room2->y][x2 - room2->x].symbol, "╬");
 }
 
 int compare_edges(const void *a, const void *b) {
@@ -1161,104 +1180,294 @@ void connect_all_rooms() {
     }
 }
 
-int is_there_object(int y, int x, char* symbol) {
-    if (!strcmp(screen[y - 1][x].symbol, symbol) && !screen[y - 1][x].condition) return 1;
-    if (!strcmp(screen[y][x + 1].symbol, symbol) && !screen[y][x + 1].condition) return 2;
-    if (!strcmp(screen[y + 1][x].symbol, symbol) && !screen[y + 1][x].condition) return 3;
-    if (!strcmp(screen[y][x - 1].symbol, symbol) && !screen[y][x - 1].condition) return 4;
-    return 0;
+void update_room_map(Room* room, int y, int x, const char* symbol, attr_t color) {
+    strcpy(room->map[y][x].symbol, symbol);
+    room->map[y][x].attributes = color;
 }
 
-void add_room_stuff(Room* room) {
-    // Add pillars
-    int b = (room->height - 4) / 3;
-    int a = (room->width  - 4) / 3;
-    for (int i = 0; i < b; i++) {
-        for (int j = 0; j < a; j++) {
-            if ((rand() % 3) == 0) {
-                int* index = &room->pillar_count;
-                room->pillars[*index].y = (room->y + 1 + (3 * i)) + rand() % 3;
-                room->pillars[*index].x = (room->x + 1 + (3 * j)) + rand() % 3;
-                (*index)++;
-            }
-        }
-    }
-    
-    // Add gold
-    int chance = rand() % 4;
-    while (chance != 0) {
-        int y = (room->y + 1) + rand() % (room->height - 2);
-        int x = (room->x + 1) + rand() % (room->width  - 2);
+void create_room_map(Room* room) {
+    int chance = 0;
 
-        int conflict = 0;
-        for (int i = 0; i < room->pillar_count; i++) {
-            if ((room->pillars[i].y == y) && (room->pillars[i].x == x)) {
-                conflict = 1;
-            }
-        }
-
-        if (!conflict) {
-            room->gold[room->gold_count].y = y;
-            room->gold[room->gold_count].x = x;
-            room->gold[room->gold_count].value = 20 + 5 * (rand() % 5);
-            room->gold_count++;
-
-            chance--;
-        }
-    }
-}
-
-void set_room_index(int y, int x, char* symbol, attr_t attribute) {
-    strcpy(screen[y][x].symbol, symbol);
-    screen[y][x].attributes = attribute;
-}
-
-void set_room(Room *room) {
-    int x = room->x;
-    int y = room->y;
-    int width = room->width;
-    int height = room->height;
-
+    // Room theme
     attr_t color;
     if (!strcmp(room->kind, "start")) 
-        color = COLOR_PAIR(6);
+        color = COLOR_PAIR(7);
     else if(!strcmp(room->kind, "stair"))
         color = COLOR_PAIR(5);
     else
         color = COLOR_PAIR(3);
 
-    // Walls and Corners
-    set_room_index(y, x, "╔", color);
-    set_room_index(y, x + width - 1, "╗", color);
-    set_room_index(y + height - 1, x, "╚", color);
-    set_room_index(y + height - 1, x + width - 1, "╝", color);
-    for (int i = x + 1; i < x + width - 1; i++) {
-        set_room_index(y, i, "═", color);
-        set_room_index(y + height - 1, i, "═", color);
+    // Add walls and corners
+    update_room_map(room, 0, 0, "╔", color);
+    update_room_map(room, 0, room->width - 1, "╗", color);
+    update_room_map(room, room->height - 1, 0, "╚", color);
+    update_room_map(room, room->height - 1, room-> width - 1, "╝", color);
+    for (int x = 1; x < room->width - 1; x++) {
+        if (!strcmp(room->map[0][x].symbol, "╬"))
+            room->map[0][x].attributes = color;
+        else
+            update_room_map(room, 0, x, "═", color);
+
+        if (!strcmp(room->map[room->height - 1][x].symbol, "╬"))
+            room->map[room->height - 1][x].attributes = color;
+        else
+            update_room_map(room, room->height - 1, x, "═", color);
     }
-    for (int i = y + 1; i < y + height - 1; i++) {
-        set_room_index(i, x, "║", color);
-        set_room_index(i, x + width - 1, "║", color);
-    }
-    for (int i = 0; i < room->door_count; i++) {
-        set_room_index(room->doors[i].y, room->doors[i].x, "╬", color);
+    for (int y = 1; y < room->height - 1; y++) {
+        if (!strcmp(room->map[y][0].symbol, "╬"))
+            room->map[y][0].attributes = color;
+        else
+            update_room_map(room, y, 0, "║", color);
+
+        if (!strcmp(room->map[y][room->width - 1].symbol, "╬"))
+            room->map[y][room->width - 1].attributes = color;
+        else
+            update_room_map(room, y, room->width - 1, "║", color);
     }
 
-    // Floor
-    for (int i = y + 1; i < y + height - 1; i++) {
-        for (int j = x + 1; j < x + width - 1; j++) {
-            set_room_index(i, j, ".", COLOR_PAIR(5));
+    // Add pillars
+    int b = (room->height - 4) / 3;
+    int a = (room->width  - 4) / 3;
+    for (int i = 0; i < b; i++) {
+        for (int j = 0; j < a; j++) {
+            if ((rand() % 2) == 0) {
+                int y = (2 + (3 * i)) + rand() % 3;
+                int x = (2 + (3 * j)) + rand() % 3;
+                update_room_map(room, y, x, "■", color); 
+            }
+        }
+    }
+    
+    // Add gold
+    chance = rand() % 4;
+    while (chance != 0) {
+        int y = 1 + rand() % (room->height - 2);
+        int x = 1 + rand() % (room->width  - 2);
+
+        if (room->map[y][x].symbol[0] == '\0') {
+            update_room_map(room, y, x, "🜚", COLOR_PAIR(3) | A_BOLD);
+            room->map[y][x].value = 10 + 5 * (rand() % 3);
+            chance--;
         }
     }
 
-    // Pillar
-    for (int i = 0; i < room->pillar_count; i++) {
-        set_room_index(room->pillars[i].y, room->pillars[i].x, "■", color);
+    // Add black gold
+    if (rand() % 20 == 0) {
+        int y = 1 + rand() % (room->height - 2);
+        int x = 1 + rand() % (room->width  - 2);
+
+        if (room->map[y][x].symbol[0] == '\0') {
+            update_room_map(room, y, x, "ᴥ", COLOR_PAIR(1));
+            room->map[y][x].value = 100;
+        }
     }
 
-    // Gold
-    for (int i = 0; i < room->gold_count; i++) {
-        set_room_index(room->gold[i].y, room->gold[i].x, "🜚", COLOR_PAIR(3) | A_BOLD);
+    // Add food
+    if (!strcmp(room->kind, "start")) chance = 1;
+    else chance = rand() % 3;
+    while (chance != 0) {
+        int y = 1 + rand() % (room->height - 2);
+        int x = 1 + rand() % (room->width  - 2);
+
+        if (room->map[y][x].symbol[0] == '\0') {
+            int which = rand() % 16;
+            if (0 <= which && which <= 13) // normal or rotten
+                update_room_map(room, y, x, "֍", COLOR_PAIR(1));
+            else if (which == 14) // magic
+                update_room_map(room, y, x, "♣", COLOR_PAIR(6));
+            else // supreme
+                update_room_map(room, y, x, "♦", COLOR_PAIR(8));
+            
+            chance--;
+        }
+    }
+
+    // Add weapon
+    if (rand() % 8 == 0) {
+        int y = 1 + rand() % (room->height - 2);
+        int x = 1 + rand() % (room->width  - 2);
+
+        if (room->map[y][x].symbol[0] == '\0') {
+            chance = rand() % 10;
+            if (0 <= chance && chance <= 2) { // Dagger
+                update_room_map(room, y, x, "⸸", COLOR_PAIR(8));
+            } else if (chance == 3) { // Magic Wand
+                update_room_map(room, y, x, "|", COLOR_PAIR(8));
+            } else if (chance == 4) { // Sword
+                update_room_map(room, y, x, "⚔", COLOR_PAIR(8));
+            } else { // Arrow
+                update_room_map(room, y, x, "➳", COLOR_PAIR(8));
+            }
+        }
+    }
+
+    // Add potion
+    if (rand() % 10 == 0) {
+        int y = 1 + rand() % (room->height - 2);
+        int x = 1 + rand() % (room->width  - 2);
+
+        if (room->map[y][x].symbol[0] == '\0') {
+            chance = rand() % 5;
+            if (chance == 0 || chance == 1) { // Health
+                update_room_map(room, y, x, "♥", COLOR_PAIR(4));
+            } else if (chance == 2 || chance == 3) { // Speed
+                update_room_map(room, y, x, "♯", COLOR_PAIR(6));
+            } else if (chance == 4) { // Damage
+                update_room_map(room, y, x, "●", COLOR_PAIR(8));
+            }
+        }
+    }
+
+    // Add trap
+    chance = rand() % 2;
+    while (chance != 0) {
+        int y = 1 + rand() % (room->height - 2);
+        int x = 1 + rand() % (room->width  - 2);
+        if (room->map[y][x].symbol[0] == '\0') {
+            update_room_map(room, y, x, ".", COLOR_PAIR(5));
+            chance--;
+        }
+    }
+
+    // Add floor
+    for (int i = 1; i < room->height - 1; i++) {
+        for (int j = 1; j < room->width - 1; j++) {
+            if (room->map[i][j].symbol[0] == '\0') {
+                update_room_map(room, i, j, "·", COLOR_PAIR(5));
+            }
+        }
+    }
+}
+
+void update_room_in_screen(int y, int x, char* symbol, attr_t attribute) {
+    strcpy(screen[y][x].symbol, symbol);
+    screen[y][x].attributes = attribute;
+}
+
+void create_room_in_screen(Room *room) {
+    for (int i = 0; i < room->height; i++) {
+        for (int j = 0; j < room->width; j++) {
+            update_room_in_screen(i + room->y, j + room->x, room->map[i][j].symbol, room->map[i][j].attributes);
+        }
+    }
+}
+
+int is_there_monster(Room* room, int y, int x) {
+    for (int i = 0; i < room->monster_count; i++) {
+        if ((room->monsters[i].character.y == y) && (room->monsters[i].character.x == x)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void init_demon(Room* room, int monster_index) {
+    Monster* monster = &room->monsters[monster_index];
+
+    strcpy(monster->name, "DEMON");
+    strcpy(monster->character.symbol, "D");
+    monster->character.attributes = COLOR_PAIR(1);
+
+    monster->health = 5;
+    monster->damage = 2;
+    monster->can_follow = 0;
+}
+
+void init_fire(Room* room, int monster_index) {
+    Monster* monster = &room->monsters[monster_index];
+
+    strcpy(monster->name, "FIRE BREATHING MONSTER");
+    strcpy(monster->character.symbol, "F");
+    monster->character.attributes = COLOR_PAIR(3);
+
+    monster->health = 10;
+    monster->damage = 5;
+    monster->can_follow = 0;
+}
+
+void init_giant(Room* room, int monster_index) {
+    Monster* monster = &room->monsters[monster_index];
+
+    strcpy(monster->name, "GIANT");
+    strcpy(monster->character.symbol, "G");
+    monster->character.attributes = COLOR_PAIR(1);
+
+    monster->health = 15;
+    monster->damage = 10;
+    monster->can_follow = 1;
+}
+
+void init_snake(Room* room, int monster_index) {
+    Monster* monster = &room->monsters[monster_index];
+
+    strcpy(monster->name, "SNAKE");
+    strcpy(monster->character.symbol, "S");
+    monster->character.attributes = COLOR_PAIR(1);
+
+    monster->health = 20;
+    monster->damage = 15;
+    monster->can_follow = 1;
+}
+
+void init_undeed(Room* room, int monster_index) {
+    Monster* monster = &room->monsters[monster_index];
+
+    strcpy(monster->name, "UNDEED");
+    strcpy(monster->character.symbol, "U");
+    monster->character.attributes = COLOR_PAIR(1);
+
+    monster->health = 30;
+    monster->damage = 20;
+    monster->can_follow = 1;
+}
+
+void set_monster(Room* room, int monster_index) {
+    Monster* monster = &room->monsters[monster_index];
+    while (1) {
+        int y = (room->y + 1) + rand() % (room->height - 2);
+        int x = (room->x + 1) + rand() % (room->width - 2);
+        if (!is_there_monster(room, y, x) && strcmp(room->map[y - room->y][x - room->x].symbol, "■")) {
+            monster->character.y = y;
+            monster->character.x = x;
+
+            // Set previous map index of the monster
+            strcpy(monster->previous.symbol, room->map[y - room->y][x - room->x].symbol);
+            monster->previous.attributes = room->map[y - room->y][x - room->x].attributes;
+
+            // Set the screen location of monster
+            strcpy(screen[y][x].symbol, monster->character.symbol);
+            screen[y][x].attributes = monster->character.attributes;
+
+            return;
+        }
+    }
+}
+
+void add_monsters(Room* room) {
+    int random_number = ((int)((room->height - 2) / 5)  + 1) * ((int)((room->width - 2) / 5) + 1);
+    if (random_number > 5) random_number = 5;
+    
+    int total_monster = 1 + rand() % random_number;
+    if (!strcmp(room->kind, "start")) {
+        init_demon(room, 0);
+        set_monster(room, 0);
+        room->monster_count++;
+        return;
+    }
+
+    for (int i = 0; i < total_monster; i++) {
+        int which = rand() % 100;
+        if (0 <= which && which <= 39) { // Demon %40 chance
+            init_demon(room, i);
+        } else if (40 <= which && which <= 74) { // Fire Breathing Monster %35 chance
+            init_fire(room, i);
+        } else if (75 <= which && which <= 89) { // Giant %15 chance
+            init_giant(room, i);
+        } else { // Snake %10 chance
+            init_snake(room, i);
+        }
+        set_monster(room, i);
+        room->monster_count++;
     }
 }
 
@@ -1266,58 +1475,113 @@ void draw_room(Room *room) {
     for (int y = room->y; y < room->y + room->height; y++) {
         for (int x = room->x; x < room->x + room->width; x++) {
             attron(screen[y][x].attributes);
-            mvprintw(y, x , "%s", screen[y][x].symbol);
+            mvprintw(y, x, "%s", screen[y][x].symbol);
             attroff(screen[y][x].attributes);
 
             screen[y][x].condition = 1;
         }
     }
-    
     refresh();
 }
 
+void init_inventory() {
+    // Food
+    // regular or rotten
+    hero.inventory.foods[0].number = 0;
+    hero.inventory.foods[0].value  = 10 + rand() % 6;
+    // magic
+    hero.inventory.foods[1].number = 0;
+    hero.inventory.foods[1].value  = 15 + rand() % 6;
+    // supreme
+    hero.inventory.foods[2].number = 0;
+    hero.inventory.foods[3].value  = 15 + rand() % 6;
+
+    // Weapon
+    hero.inventory.which_weapon = 0;
+    // mace
+    hero.inventory.weapons[0].number = 1;
+    hero.inventory.weapons[0].value  = 5;
+    // dagger
+    hero.inventory.weapons[1].number = 0;
+    hero.inventory.weapons[1].value  = 12;
+    // wand
+    hero.inventory.weapons[2].number = 0;
+    hero.inventory.weapons[2].value  = 15;
+    // arrow
+    hero.inventory.weapons[3].number = 0;
+    hero.inventory.weapons[3].value  = 5;
+    // sword
+    hero.inventory.weapons[4].number = 0;
+    hero.inventory.weapons[4].value  = 10;
+
+    // Potion
+    // health
+    hero.inventory.potions[0].number = 0;
+    // speed
+    hero.inventory.potions[1].number = 0;
+    // damage
+    hero.inventory.potions[2].number = 0;
+}
+
 void set_hero() {
-    int y = hero.y;
-    int x = hero.x;
-    strcpy(screen[y][x].symbol, hero.symbol);
-    screen[y][x].attributes = hero.attributes;
+    int y = hero.character.y;
+    int x = hero.character.x;
+    strcpy(screen[y][x].symbol, hero.character.symbol);
+    screen[y][x].attributes = hero.character.attributes;
     screen[y][x].condition = 1;
 }
 
 void init_hero() {
     // Set hero
-    strcpy(hero.symbol, "☻");
+    // Character
+    strcpy(hero.character.symbol, "☻");
 
+    //Attributes
     if (!strcmp(current_user.settings.hero_color, "yellow"))
-        hero.attributes = COLOR_PAIR(3);
+        hero.character.attributes = COLOR_PAIR(3);
     else if (!strcmp(current_user.settings.hero_color, "green"))
-        hero.attributes = COLOR_PAIR(5);
+        hero.character.attributes = COLOR_PAIR(5);
     else if (!strcmp(current_user.settings.hero_color, "red"))
-        hero.attributes = COLOR_PAIR(4);
+        hero.character.attributes = COLOR_PAIR(4);
     else if (!strcmp(current_user.settings.hero_color, "blue"))
-        hero.attributes = COLOR_PAIR(6);
+        hero.character.attributes = COLOR_PAIR(6);
 
+    // Position
     Region start = regions[start_region / HORIZENTAL][start_region % HORIZENTAL];
-    hero.y = start.room->y + 1;
-    hero.x = start.room->x + 1;
-    // This code added to avoid confilct between hero and pillar
-    if (!strcmp(screen[hero.y][hero.x].symbol, "■")) hero.y++;
+    hero.character.y = start.room->y + 1;
+    hero.character.x = start.room->x + 1;
 
+    // Inventory
+    init_inventory();
+
+    // Other
+    hero.walk = 0;
     hero.level = 0;
-    hero.health = 100;
+    if (!strcmp(current_user.settings.difficulty, "easy")) {
+        hero.health = 100;
+        hero.hunger = 100;
+    } else if (!strcmp(current_user.settings.difficulty, "normal")) {
+        hero.health = 85;
+        hero.hunger = 85;
+    } else {
+        hero.health = 70;
+        hero.hunger = 70;
+    }
     hero.gold = 0;
+    hero.healing_speed = 1;
+    hero.speed = 1;
+    hero.base_power = 0;
 
     // Set previous location of hero
-    strcpy(previous.symbol, ".");
+    strcpy(previous.symbol, "·");
     previous.attributes = A_BOLD | COLOR_PAIR(5);
     previous.y = start.room->y + 1;
     previous.x = start.room->x + 1;
-    previous.level = 0;
 
     // Draw hero
-    attron(hero.attributes);
-    mvprintw(hero.y, hero.x, "%s", hero.symbol);
-    attroff(hero.attributes);
+    attron(hero.character.attributes);
+    mvprintw(hero.character.y, hero.character.x, "%s", hero.character.symbol);
+    attroff(hero.character.attributes);
     refresh();
 }
 
@@ -1329,44 +1593,470 @@ void show_health() {
     attron(COLOR_PAIR(4));
     int health_bar = (hero.health % 10 == 0) ? (hero.health / 10) : ((int)(hero.health / 10) + 1);
     for (int i = 0; i < health_bar; i++) {
-        printw("\u2665 ");
+        printw("♥ ");
     }
     for (int i = health_bar; i < 10; i++) {
-        printw("\u2661 ");
+        printw("♡ ");
     }
     printw("%d", hero.health);
     attroff(COLOR_PAIR(4));
 }
 
-void show_gold() {
+void show_hunger() {
     attron(COLOR_PAIR(3) | A_BOLD);
-    mvprintw(2, 37, "GOLD: ");
+    mvprintw(2, 37, "HUNGER: ");
     attroff(COLOR_PAIR(3) | A_BOLD);
 
     attron(COLOR_PAIR(5));
-    printw("%d", hero.gold);
+    int hunger = (hero.hunger % 10 == 0) ? (hero.hunger / 10) : ((int)(hero.hunger / 10) + 1);
+    for (int i = 0; i < hunger; i++) {
+        printw("■ ");
+    }
+    for (int i = hunger; i < 10; i++) {
+        printw("□ ");
+    }
+    printw("%d", hero.hunger);
     attroff(COLOR_PAIR(5));
 }
 
-void guide() {
-    show_health();
-
+void show_gold() {
     attron(COLOR_PAIR(3) | A_BOLD);
-    printw(" ┇ ");
+    mvprintw(2, 71, "GOLD: ");
     attroff(COLOR_PAIR(3) | A_BOLD);
 
+    attron(COLOR_PAIR(1));
+    printw("%d", hero.gold);
+    attroff(COLOR_PAIR(1));
+}
+
+void clear_inventory_bar() {
+    for (int i = 84; i < WIDTH - 3; i++) {
+            mvprintw(2, i, " ");
+    }
+}
+
+void consume_food() {
+    show_message("I or ESC: quit | ENTER: eat");
+    clear_inventory_bar();
+    int max_width = (WIDTH - 4) - 84;
+
+    char* foods[20] = {
+        "🥔",
+        "✨",
+        "🥞"
+    };
+
+    int which = 0;
+    int ch = 0;
+    while (1) {
+            move(2, 84 + (max_width - 24) / 2);
+            for (int i = 0; i < 3; i++) {
+                if (i == which) {
+                    attron(COLOR_PAIR(1) | A_BOLD | A_UNDERLINE);
+                    printw(" %s (%d) ", foods[i], hero.inventory.foods[i].number);
+                    attroff(COLOR_PAIR(1) | A_BOLD | A_UNDERLINE);
+                }
+                else {
+                    attron(COLOR_PAIR(1));
+                    printw(" %s (%d) ", foods[i], hero.inventory.foods[i].number);
+                    attroff(COLOR_PAIR(1));
+                }
+            }
+
+            ch = getch();
+            if (ch == 'i' || ch == 27) {
+                clear_inventory_bar();
+                return;
+            }
+            else if (ch == KEY_RIGHT || ch == 'd') 
+                which = (which + 1) % 3;
+            else if (ch == KEY_LEFT || ch == 'a')
+                which = (which - 1 + 3) % 3;
+            else if (ch == '\n') {
+                if (hero.inventory.foods[which].number == 0)
+                    show_message("You have nothing of the chosen food!");
+                else {
+                    switch (which) {
+                    case 0:
+                        if (rand() % 5 == 0) {
+                            show_message("OOPS!! The food was rotten!");
+                            hero.hunger -= hero.inventory.foods[0].value / 2;
+                            hero.health -= hero.inventory.foods[0].value / 2;
+                            show_health();
+                        } else {
+                            show_message("Hmm! That was good!");
+                            hero.hunger += hero.inventory.foods[0].value;
+                        }
+                        break;
+                    
+                    case 1:
+                        show_message("WOW! I feel energized!");
+                        hero.hunger += hero.inventory.foods[1].value;
+                        hero.speed = 2;
+                        hero.inventory.foods[1].first_consume = hero.walk;
+                        break;
+
+                    case 3:
+                        show_message("My GOD! I can feel the strength in my muscles!");
+                        hero.hunger += hero.inventory.foods[2].value;
+                        hero.base_power = 5;
+                        hero.inventory.foods[2].first_consume = hero.walk;
+                        break;
+                    }
+
+                    if (hero.hunger > 100) hero.hunger = 100;
+                    else if (hero.hunger < 5) hero.hunger = 4;
+
+                    show_hunger();
+                    hero.inventory.foods[which].number--;
+                }
+            }
+    }
+}
+
+void choose_weapon() {
+    show_message("I or ESC: quit | ENTER: choose");
+    clear_inventory_bar();
+    int max_width = (WIDTH - 4) - 84;
+
+    char* weapons[20] = {
+        "🪓",
+        "🗡",
+        "🪄",
+        "➳",
+        "⚔"
+    };
+
+    int which = hero.inventory.which_weapon;
+    int ch = 0;
+    while (1) {
+            move(2, 84 + (max_width - 40) / 2);
+            for (int i = 0; i < 5; i++) {
+                if (i == which) {
+                    attron(COLOR_PAIR(1) | A_BOLD | A_UNDERLINE);
+                    printw(" %s (%d) ", weapons[i], hero.inventory.weapons[i].number);
+                    attroff(COLOR_PAIR(1) | A_BOLD | A_UNDERLINE);
+                }
+                else {
+                    attron(COLOR_PAIR(1));
+                    printw(" %s (%d) ", weapons[i], hero.inventory.weapons[i].number);
+                    attroff(COLOR_PAIR(1));
+                }
+            }
+
+            ch = getch();
+            if (ch == 'i' || ch == 27) {
+                clear_inventory_bar();
+                return;
+            }
+            else if (ch == KEY_RIGHT || ch == 'd') 
+                which = (which + 1) % 5;
+            else if (ch == KEY_LEFT || ch == 'a')
+                which = (which - 1 + 5) % 5;
+            else if (ch == '\n') {
+                if (hero.inventory.weapons[which].number == 0)
+                    show_message("You don't have the chosen weapon!");
+                else {
+                    hero.inventory.which_weapon = which;
+                    show_message("The weapon has been selected.");
+                }
+            }
+    }
+}
+
+void consume_potion() {
+    show_message("I or ESC: quit | ENTER: eat");
+    clear_inventory_bar();
+    int max_width = (WIDTH - 4) - 84;
+
+    char* potions[20] = {
+        "❤️",
+        "🚀",
+        "💪"
+    };
+
+    int which = 0;
+    int ch = 0;
+    while (1) {
+            move(2, 84 + (max_width - 24) / 2);
+            for (int i = 0; i < 3; i++) {
+                if (i == which) {
+                    attron(COLOR_PAIR(1) | A_BOLD | A_UNDERLINE);
+                    printw(" %s (%d) ", potions[i], hero.inventory.potions[i].number);
+                    attroff(COLOR_PAIR(1) | A_BOLD | A_UNDERLINE);
+                }
+                else {
+                    attron(COLOR_PAIR(1));
+                    printw(" %s (%d) ", potions[i], hero.inventory.potions[i].number);
+                    attroff(COLOR_PAIR(1));
+                }
+            }
+
+            ch = getch();
+            if (ch == 'i' || ch == 27) {
+                clear_inventory_bar();
+                return;
+            }
+            else if (ch == KEY_RIGHT || ch == 'd') 
+                which = (which + 1) % 3;
+            else if (ch == KEY_LEFT || ch == 'a')
+                which = (which - 1 + 3) % 3;
+            else if (ch == '\n') {
+                if (hero.inventory.potions[which].number == 0)
+                    show_message("You have nothing of the chosen potion!");
+                else {
+                    switch (which) {
+                    case 0:
+                        hero.healing_speed = 2;
+                        show_message("Now you are healing faster.");
+                        break;
+                    
+                    case 1:
+                        hero.speed = 3;
+                        show_message("Now you are faster.");
+                        break;
+
+                    case 2:
+                        hero.base_power = -2;
+                        show_message("Now you are stronger.");
+                        break;
+                    }
+                    hero.inventory.potions[which].first_consume = hero.walk;
+                    hero.inventory.potions[which].number--;
+                }
+            }
+    }
+}
+
+void show_inventory(int condition) {
+    clear_inventory_bar();
+    int max_width = (WIDTH - 4) - 84;
+
+    if (condition == 0) {
+        const char* message = "PRESS 'I' TO OPEN YOUR INVENTORY";
+        int x = 84 + (max_width - strlen(message)) / 2;
+
+        attron(COLOR_PAIR(3) | A_BOLD);
+        mvprintw(2, x, "%s", message);
+        attroff(COLOR_PAIR(3) | A_BOLD);
+    }
+    else {
+        const char* menu[] = {
+            "FOOD",
+            "WEAPON",
+            "POTION"
+        };
+
+        int which = 0;
+        int ch = 0;
+        while (1) {
+            move(2, 84 + (max_width - 32) / 2);
+            for (int i = 0; i < 3; i++) {
+                if (i == which) {
+                    attron(COLOR_PAIR(2) | A_BOLD);
+                    printw("<< %s >>", menu[i]);
+                    attroff(COLOR_PAIR(2) | A_BOLD);
+                }
+                else {
+                    attron(COLOR_PAIR(3) | A_BOLD);
+                    printw("   %s   ", menu[i]);
+                    attroff(COLOR_PAIR(3) | A_BOLD);
+                }
+            }
+
+            ch = getch();
+            if ((ch == 27) || (ch == 'i')) {
+                show_inventory(0);
+                return;
+            }
+            else if (ch == KEY_RIGHT || ch == 'd') 
+                which = (which + 1) % 3;
+            else if (ch == KEY_LEFT || ch == 'a')
+                which = (which - 1 + 3) % 3;
+            else if (ch == '\n') {
+                switch (which) {
+                case 0:
+                    consume_food();
+                    break;
+                case 1:
+                    choose_weapon();
+                    break;
+                case 2:
+                    consume_potion();
+                    break;
+                }
+            }
+        }
+    }
+    refresh();
+}
+
+void guide() {
+    attron(COLOR_PAIR(3) | A_BOLD);
+    mvprintw(2, 35, "┇");
+    mvprintw(2, 69, "┇");
+    mvprintw(2, 82, "┇");
+    attroff(COLOR_PAIR(3) | A_BOLD);
+
+    show_health();
+    show_hunger();
     show_gold();
+    show_inventory(0);
 
     refresh();
 }
 
-int is_walkable(int y, int x) {
-    if (screen[y][x].symbol[0] == '\0') return 0;
+void earn_gold(Room* room, int new_y, int new_x) {
+    int y = new_y - room->y;
+    int x = new_x - room->x;
 
-    return (strcmp(screen[y][x].symbol, "■")
-         && strcmp(screen[y][x].symbol, "║") && strcmp(screen[y][x].symbol, "═")
-         && strcmp(screen[y][x].symbol, "╔") && strcmp(screen[y][x].symbol, "╗")
-         && strcmp(screen[y][x].symbol, "╝") && strcmp(screen[y][x].symbol, "╚"));
+    char message[50];
+    sprintf(message, "You've earned %d golds!", room->map[y][x].value);
+    show_message(message);
+
+    hero.gold += room->map[y][x].value;
+    show_gold();
+
+    strcpy(previous.symbol, "·");
+    previous.attributes = COLOR_PAIR(5);
+
+    update_room_in_screen(previous.y, previous.x, "·", COLOR_PAIR(5));
+    update_room_map(room, y, x, "·", COLOR_PAIR(5));
+}
+
+void earn_food(Room* room, int new_y, int new_x, int which_food) {
+    int y = new_y - room->y;
+    int x = new_x - room->x;
+
+    switch (which_food) {
+    case 0:
+        show_message("You've got a normal food!");
+        hero.inventory.foods[0].number++;
+        break;
+    case 1:
+        show_message("You've got a magic food!");
+        hero.inventory.foods[1].number++;
+        break;
+    case 2:
+        show_message("You've got a supreme food!");
+        hero.inventory.foods[2].number++;
+        break;
+    }
+
+    strcpy(previous.symbol, "·");
+    previous.attributes = COLOR_PAIR(5);
+
+    update_room_in_screen(previous.y, previous.x, "·", COLOR_PAIR(5));
+    update_room_map(room, y, x, "·", COLOR_PAIR(5));
+}
+
+void delete_all_swords() {
+    for (int i = 0; i < VERTICAL; i++) {
+        for (int j = 0; j < HORIZENTAL; j++) {
+            Room* room = regions[i][j].room;
+            if (room != NULL) {
+                for (int y = 1; y < room->height - 1; y++) {
+                    for (int x = 1; x < room->width - 1; x++) {
+                        if (!strcmp(room->map[y][x].symbol, "⚔")) {
+                            update_room_in_screen(room->y + y, room->x + x, "·", COLOR_PAIR(5));
+                            update_room_map(room, y, x, "·", COLOR_PAIR(5));
+
+                            if (screen[room->y + y][room->x + x].condition) {
+                                attron(COLOR_PAIR(5));
+                                mvprintw(room->y + y, room->x + x, "·");
+                                attroff(COLOR_PAIR(5));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Draw Hero
+    attron(hero.character.attributes);
+    mvprintw(hero.character.y, hero.character.x, "%s", hero.character.symbol);
+    attroff(hero.character.attributes);
+}
+
+void get_weapon(Room* room, int new_y, int new_x, int which_weapon) {
+    show_message("Press enter to get the weapon");
+    int ch = getch();
+    if (ch != '\n') return;
+
+    int y = new_y - room->y;
+    int x = new_x - room->x;
+
+    switch (which_weapon) {
+    case 1:
+        show_message("You've got 5 daggers.");
+        hero.inventory.weapons[1].number += 5;
+        break;
+    case 2:
+        show_message("You've got 4 magic wands.");
+        hero.inventory.weapons[2].number += 4;
+        break;
+    case 3:
+        show_message("You've got 10 arrows.");
+        hero.inventory.weapons[3].number += 10;
+        break;
+    case 4:
+        show_message("Well done! You've got a sword.");
+        hero.inventory.weapons[4].number = 1;
+        delete_all_swords();
+        break;
+    }
+
+    strcpy(previous.symbol, "·");
+    previous.attributes = COLOR_PAIR(5);
+
+    update_room_in_screen(previous.y, previous.x, "·", COLOR_PAIR(5));
+    update_room_map(room, y, x, "·", COLOR_PAIR(5));
+
+    refresh();
+}
+
+void get_potion(Room* room, int new_y, int new_x, int which_potion) {
+    show_message("Press enter to get the potion");
+    int ch = getch();
+    if (ch != '\n') return;
+
+    int y = new_y - room->y;
+    int x = new_x - room->x;
+
+    switch (which_potion) {
+    case 0:
+        show_message("You've got a health potion.");
+        break;
+    case 1:
+        show_message("You've got a speed potion.");
+        break;
+    case 2:
+        show_message("You've got a damage potion.");
+        break;
+    }
+    hero.inventory.potions[which_potion].number++;
+
+    strcpy(previous.symbol, "·");
+    previous.attributes = COLOR_PAIR(5);
+
+    update_room_in_screen(previous.y, previous.x, "·", COLOR_PAIR(5));
+    update_room_map(room, y, x, "·", COLOR_PAIR(5));
+}
+
+void trap(Room* room, int new_y, int new_x) {
+    int y = new_y - room->y;
+    int x = new_x - room->x;
+
+    printf("\a");
+    show_message("You stepped on a trap!");
+    hero.health -= 5;
+    show_health();
+
+    strcpy(previous.symbol, "^");
+    previous.attributes = COLOR_PAIR(5);
+
+    update_room_in_screen(previous.y, previous.x, "^", COLOR_PAIR(5));
+    update_room_map(room, y, x, "^", COLOR_PAIR(5));
 }
 
 void update_previous(int new_y, int new_x) {
@@ -1382,18 +2072,276 @@ void update_previous(int new_y, int new_x) {
     previous.attributes = screen[new_y][new_x].attributes;
 
     // Move the hero
-    hero.y = new_y;
-    hero.x = new_x;
+    hero.character.y = new_y;
+    hero.character.x = new_x;
 
     // Draw the hero at the new position
-    attron(hero.attributes);
-    mvprintw(hero.y, hero.x, "%s", hero.symbol);
-    attroff(hero.attributes);
+    attron(hero.character.attributes);
+    mvprintw(hero.character.y, hero.character.x, "%s", hero.character.symbol);
+    attroff(hero.character.attributes);
 
     // Set the condition to 1
-    screen[hero.y][hero.x].condition = 1;
+    screen[hero.character.y][hero.character.x].condition = 1;
 
     refresh();
+}
+
+void show_screen(int condition) {
+    for (int i = 4; i < HEIGHT - 1; i++) {
+        for (int j = 1; j < WIDTH - 1; j++) {
+            if (screen[i][j].symbol[0] != '\0') {
+                attron(screen[i][j].attributes);
+                if (condition || screen[i][j].condition)
+                    mvprintw(i, j, "%s", screen[i][j].symbol);
+                else
+                    mvprintw(i, j, " ");
+                attroff(screen[i][j].attributes);
+            }
+        }
+    }
+
+    // Draw hero
+    attron(hero.character.attributes);
+    mvprintw(hero.character.y, hero.character.x, "%s", hero.character.symbol);
+    attroff(hero.character.attributes);
+
+    refresh();
+}
+
+// For hero
+int is_walkable(int y, int x) {
+    if (screen[y][x].symbol[0] == '\0') return 0;
+
+    return ((screen[y][x].symbol[0] != 'D') && (screen[y][x].symbol[0] != 'F')
+         && (screen[y][x].symbol[0] != 'G') && (screen[y][x].symbol[0] != 'S')
+         && (screen[y][x].symbol[0] != 'U') && strcmp(screen[y][x].symbol, "■")
+         && strcmp(screen[y][x].symbol, "║") && strcmp(screen[y][x].symbol, "═")
+         && strcmp(screen[y][x].symbol, "╔") && strcmp(screen[y][x].symbol, "╗")
+         && strcmp(screen[y][x].symbol, "╝") && strcmp(screen[y][x].symbol, "╚"));
+}
+
+// For shhowing new corridors
+int is_there_corridor(int y, int x) {
+    if (!strcmp(screen[y - 1][x].symbol, "░") && !screen[y - 1][x].condition) return 1;
+    if (!strcmp(screen[y][x + 1].symbol, "░") && !screen[y][x + 1].condition) return 2;
+    if (!strcmp(screen[y + 1][x].symbol, "░") && !screen[y + 1][x].condition) return 3;
+    if (!strcmp(screen[y][x - 1].symbol, "░") && !screen[y][x - 1].condition) return 4;
+    return 0;
+}
+
+// For long-range weapons
+int is_it_block(int y, int x) {
+    if (screen[y][x].symbol[0] == '\0') return 1;
+
+    return (!strcmp(screen[y][x].symbol, "■")
+         || !strcmp(screen[y][x].symbol, "║") || !strcmp(screen[y][x].symbol, "═")
+         || !strcmp(screen[y][x].symbol, "╔") || !strcmp(screen[y][x].symbol, "╗")
+         || !strcmp(screen[y][x].symbol, "╝") || !strcmp(screen[y][x].symbol, "╚"));
+}
+
+int monster_index_finder(Room* room, int y, int x) {
+    for (int i = 0; i < room->monster_count; i++) {
+        if ((room->monsters[i].character.y == y) 
+         && (room->monsters[i].character.x == x) 
+         && (room->monsters[i].health > 0))
+            return i;
+    }
+    return -1;
+}
+
+void attack_monster(Monster* monster, int which_weapon) {
+    int weapon_damage = hero.inventory.weapons[which_weapon].value;
+    int damage = (hero.base_power == -2) ? (2 * weapon_damage) : (hero.base_power + weapon_damage);
+    monster->health -= damage;
+    if (monster->health > 0) {
+        char message[60];
+        sprintf(message, "%s health: %d", monster->name, monster->health);
+        show_message(message);
+
+        if (monster->can_follow && which_weapon == 2) {
+            getch();
+            monster->can_follow = 0;
+            char new_message[70];
+            sprintf(new_message, "The %s walking ability has been disabled.", monster->name);
+            show_message(new_message);
+        }
+    } else {
+        char message[60];
+        sprintf(message, "You killed %s", monster->name);
+        show_message(message);
+        
+        int y = monster->character.y;
+        int x = monster->character.x;
+        update_room_in_screen(y, x, monster->previous.symbol, monster->previous.attributes);
+        attron(screen[y][x].attributes);
+        mvprintw(y, x, "%s", screen[y][x].symbol);
+        attroff(screen[y][x].attributes);
+    }
+
+    getch();
+    show_message(" ");
+}
+
+void use_short_range(Room* room, int which) {
+    int flag = 0;
+    for (int y = hero.character.y - 1; y <= hero.character.y + 1; y++) {
+        for (int x = hero.character.x - 1; x <= hero.character.x + 1; x++) {
+            int index = monster_index_finder(room, y, x);
+            if (index != -1) {
+                attack_monster(&room->monsters[index], which);
+                flag++;
+            }
+        }
+    }
+
+    if (!flag) {
+        show_message("There is no monster nearby!");
+    }
+}
+
+void use_long_range(Room* room, int which) {
+    int range = (which == 2) ? 10 : 5;
+    char* symbol = (which == 1) ? "⸸" : ((which == 2) ? "/" : "➳");
+
+    int y = hero.character.y;
+    int x = hero.character.x;
+
+    show_message("Select the way you want to shoot!");
+    int ch = getch();
+    int flag = 0;
+    while (range != 0) {
+        switch (ch) {
+            case 'd': case KEY_RIGHT: x++; break;
+            case 'a': case KEY_LEFT: x--; break;
+            case 's': case KEY_DOWN: y++; break;
+            case 'w': case KEY_UP: y--; break;
+            default: show_message("Invalid Input!"); return;
+        }
+
+        if (is_it_block(y, x))  {
+            show_message("You missed the monster.");
+            break;
+        }
+
+        int index = monster_index_finder(room, y, x);
+        if (index != -1) {
+            attack_monster(&room->monsters[index], which);
+            flag++;
+            break;
+        }
+
+        attron(COLOR_PAIR(8));
+        mvprintw(y, x, "%s", symbol);
+        attroff(COLOR_PAIR(8));
+        refresh();
+
+        usleep(150000);
+
+        attron(screen[y][x].attributes);
+        mvprintw(y, x, "%s", screen[y][x].symbol);
+        attroff(screen[y][x].attributes);
+        refresh();
+
+        range--;
+    }
+
+    if (!flag) {
+        show_message("You missed the monster.");
+    }
+
+    if (--hero.inventory.weapons[which].number == 0) {
+        hero.inventory.which_weapon = 0;
+    }
+}
+
+void use_weapon() {
+    int reg = find_region_by_coordinate(hero.character.y, hero.character.x);
+    Room* room = regions[reg / HORIZENTAL][reg % HORIZENTAL].room;
+
+    switch (hero.inventory.which_weapon) {
+    case 0: 
+        use_short_range(room, 0);
+        break;
+    case 1:
+        use_long_range(room, 1);
+        break;
+    case 2:
+        use_long_range(room, 2);
+        break;
+    case 3:
+        use_long_range(room, 3);
+        break;
+    case 4:
+        use_short_range(room, 4);
+        break;
+    }
+}
+
+void game_over(int over_code) {
+    show_message("!OH NO!");
+    for (int i = 0; i < 3; i++) {
+        int y = hero.character.y;
+        int x = hero.character.x;
+
+        attron(hero.character.attributes);
+        mvprintw(y, x, " ");
+        refresh();
+        usleep(250000);
+
+        mvprintw(y, x, "%s", hero.character.symbol);
+        refresh();
+        usleep(250000);
+        attroff(hero.character.attributes);
+    }
+
+    clear();
+    draw_border();
+    show_logo(3);
+
+    curs_set(TRUE);
+
+    attron(COLOR_PAIR(5));
+    switch (over_code) {
+    case 0:
+        mvprintw(13, (WIDTH - 21) / 2, "YOU DIED FROM HUNGER!");
+        break;
+    case 1:
+        mvprintw(13, (WIDTH - 22) / 2, "YOU STEPPED ON A TRAP!");
+        break;
+    }
+    attroff(COLOR_PAIR(5));
+
+    attron(COLOR_PAIR(1));
+    mvprintw(15, (WIDTH - 28) / 2, "[Press ENTER to continue...]");
+    attroff(COLOR_PAIR(1));
+
+    refresh();
+
+    int ch = getch();
+    while (ch != '\n') ch = getch();
+    curs_set(FALSE);
+}
+
+void game_win() {
+    clear();
+    draw_border();
+    show_logo(4);
+
+    curs_set(TRUE);
+
+    attron(COLOR_PAIR(8));
+    mvprintw(8, (WIDTH - 41) / 2, "CONGRATULATIONS! YOU'VE DONE A GREAT JOB.");
+    attroff(COLOR_PAIR(8));
+
+    attron(COLOR_PAIR(1));
+    mvprintw(10, (WIDTH - 26) / 2, "Press ENTER to continue...");
+    attroff(COLOR_PAIR(1));
+
+    refresh();
+
+    int ch = getch();
+    while (ch != '\n') ch = getch();
+    curs_set(FALSE);
 }
 
 void move_player() {
@@ -1401,82 +2349,186 @@ void move_player() {
 
     while (1) {
         int ch = getchar();
-        int new_y = hero.y, new_x = hero.x;
 
-        switch (ch) {
-        case 'w': new_y--; break; // Move up
-        case 's': new_y++; break; // Move down
-        case 'a': new_x--; break; // Move left
-        case 'd': new_x++; break; // Move right
-        case 'q': new_y--; new_x--; break; // Up-left
-        case 'e': new_y--; new_x++; break; // Up-right
-        case 'z': new_y++; new_x--; break; // Down-left
-        case 'c': new_y++; new_x++; break; // Down-right
-        case 'm': show_map = !show_map; break;
-        case 27: return; // Exit loop
-        default:
-            show_message("Invalid Input!");
-            break;
+        if (ch == 27) return;
+        else if (ch == 'm') {
+            show_map = !show_map;
+            show_screen(show_map);
+            continue;
+        }
+        else if (ch == 'i') {
+            show_inventory(1);
+            continue;
+        }
+        else if (ch == ' ') {
+            use_weapon();
+            continue;
         }
 
-        if (ch == 'm') {
-            for (int i = 4; i < HEIGHT - 1; i++) {
-                for (int j = 1; j < WIDTH - 1; j++) {
-                    if (screen[i][j].symbol[0] != '\0') {
-                        attron(screen[i][j].attributes);
-                        if (show_map || screen[i][j].condition)
-                            mvprintw(i, j, "%s", screen[i][j].symbol);
-                        else
-                            mvprintw(i, j, " ");
-                        attroff(screen[i][j].attributes);
+        int new_y = hero.character.y, new_x = hero.character.x;
+        for (int i = 0; i < hero.speed; i++) {
+            int temp_y = new_y, temp_x = new_x;
+
+            switch (ch) {
+            case 'w': temp_y--; break; // Move up
+            case 's': temp_y++; break; // Move down
+            case 'a': temp_x--; break; // Move left
+            case 'd': temp_x++; break; // Move right
+            case 'q': temp_y--; temp_x--; break; // Up-left
+            case 'e': temp_y--; temp_x++; break; // Up-right
+            case 'z': temp_y++; temp_x--; break; // Down-left
+            case 'c': temp_y++; temp_x++; break; // Down-right
+            case 27: return; // Exit loop
+            default:
+                show_message("Invalid Input!");
+                break;
+            }
+
+            if (ch == 'm' || ch == 'i') break;
+            if (!is_walkable(temp_y, temp_x)) break;
+
+            new_y = temp_y;
+            new_x = temp_x;
+
+            update_previous(new_y, new_x);
+
+            hero.walk++;
+
+            // Health and Hunger
+            int freq = (hero.healing_speed == 1) ? 20 : 5;
+            int min_healing = (hero.healing_speed == 1) ? 75 : 60;
+            if (hero.walk % freq == 0) {
+                if (hero.hunger > 10) {
+                    hero.hunger -= 2;
+                    show_hunger();
+                }
+                if (hero.hunger < 50) {
+                    printf("\a");
+                    show_message("You are hungry!");
+                    hero.health -= (10 - (hero.hunger / 5));
+                    if (hero.health < 5) {
+                        game_over(0);
+                        return;
                     }
+                    show_health();
+                }
+                if (hero.hunger > min_healing) {
+                    show_message("You are healing!");
+                    hero.health += (hero.hunger - min_healing + 5) / 5;
+                    if (hero.health > 100) hero.health = 100;
+                    show_health();
                 }
             }
-            refresh();
-        }
 
-        // Check if the new position is walkable
-        if (is_walkable(new_y, new_x)) {
-            update_previous(new_y, new_x);
+            if (hero.walk % 200 == 0) {
+                if (hero.inventory.foods[1].number != 0) {
+                    show_message("The magic food became normal!");
+                    hero.inventory.foods[1].number--;
+                    hero.inventory.foods[0].number++;
+                }
+            }
+            if (hero.walk % 250 == 0) {
+                if (hero.inventory.foods[2].number != 0) {
+                    show_message("The supreme food became normal!");
+                    hero.inventory.foods[2].number--;
+                    hero.inventory.foods[0].number++;
+                } 
+            }
+
+            // Health effect
+            if ((hero.healing_speed != 1) && ((hero.walk - hero.inventory.potions[0].first_consume) > 20)) {
+                hero.healing_speed = 1;
+                show_message("The health potion effect has gone!");
+            }
+
+            // Speed effects
+            if (hero.speed != 1) {
+                if ((hero.speed == 2) && ((hero.walk - hero.inventory.foods[1].first_consume) > 30)) {
+                    hero.speed = 1;
+                    show_message("The magic food effect has gone!");
+                }
+                else if ((hero.speed == 3) && ((hero.walk - hero.inventory.potions[1].first_consume) > 10)) {
+                    hero.speed = 1;
+                    show_message("The speed potion effect has gone!");
+                }
+            }
+
+            // Damage effects
+            if ((hero.base_power > 0) && ((hero.walk - hero.inventory.foods[2].first_consume) > 30)) {
+                hero.base_power = 0;
+                show_message("The supreme food effect has gone!");
+            } else if ((hero.base_power < 0) && ((hero.walk - hero.inventory.potions[2].first_consume) > 10)) {
+                hero.base_power = 0;
+                show_message("The damage potion effect has gone!");
+            }
+
+            // Find current room
+            int reg = find_region_by_coordinate(new_y, new_x);
+            Room* room = regions[reg / HORIZENTAL][reg % HORIZENTAL].room;
+
+            // Check for trap
+            if (!strcmp(previous.symbol, ".")) {
+                trap(room, new_y, new_x);
+                if (hero.health < 5) {
+                    game_over(1);
+                    return;
+                }
+            }
 
             // Earn gold
             if (!strcmp(previous.symbol, "🜚")) {
-                int reg = find_region_by_coordinate(new_y, new_x);
-                Room* room = regions[reg / HORIZENTAL][reg % HORIZENTAL].room;
-                for (int i = 0; i < room->gold_count; i++) {
-                    if ((room->gold[i].y == previous.y) && (room->gold[i].x == previous.x)) {
-                        char message[50];
-                        sprintf(message, "You've earned %d golds!", room->gold[i].value);
-                        show_message(message);
+                earn_gold(room, new_y, new_x);
+            } else if (!strcmp(previous.symbol, "ᴥ")) {
+                earn_gold(room, new_y, new_x);
+            }
 
-                        hero.gold += room->gold[i].value;
-                        show_gold();
+            // Earn food
+            if (!strcmp(previous.symbol, "֍")) {
+                earn_food(room, new_y, new_x, 0);
+            } else if (!strcmp(previous.symbol, "♣")) {
+                earn_food(room, new_y, new_x, 1);
+            } else if (!strcmp(previous.symbol, "♦")) {
+                earn_food(room, new_y, new_x, 2);
+            }
 
-                        strcpy(previous.symbol, ".");
-                        previous.attributes = COLOR_PAIR(5);
-                        set_room_index(previous.y, previous.x, ".", COLOR_PAIR(5));
-                    }
-                }
+            // Get weapon
+            if (!strcmp(previous.symbol, "⸸")) { // Dagger
+                get_weapon(room, new_y, new_x, 1);
+            } else if (!strcmp(previous.symbol, "|")) { // Magic Wand
+                get_weapon(room, new_y, new_x, 2);
+            } else if (!strcmp(previous.symbol, "➳")) { // Arrow
+                get_weapon(room, new_y, new_x, 3);
+            } else if (!strcmp(previous.symbol, "⚔")) { // Sword
+                get_weapon(room, new_y, new_x, 4);
+            }
+
+            // Get potion  
+            if (!strcmp(previous.symbol, "♥")) { // Health
+                get_potion(room, new_y, new_x, 0);
+            } else if (!strcmp(previous.symbol, "♯")) { // Speed
+                get_potion(room, new_y, new_x, 1);
+            } else if (!strcmp(previous.symbol, "●")) { // Damage
+                get_potion(room, new_y, new_x, 2);
             }
 
             // Show corridor
-            int cor = is_there_object(hero.y, hero.x, "░");
+            int cor = is_there_corridor(hero.character.y, hero.character.x);
             switch (cor) {
             case 1:
-                mvprintw(hero.y - 1, hero.x, "░");
-                screen[hero.y - 1][hero.x].condition = 1;
+                mvprintw(hero.character.y - 1, hero.character.x, "░");
+                screen[hero.character.y - 1][hero.character.x].condition = 1;
                 break;
             case 2:
-                mvprintw(hero.y, hero.x + 1, "░");
-                screen[hero.y][hero.x + 1].condition = 1;
+                mvprintw(hero.character.y, hero.character.x + 1, "░");
+                screen[hero.character.y][hero.character.x + 1].condition = 1;
                 break;
             case 3:
-                mvprintw(hero.y + 1, hero.x, "░");
-                screen[hero.y + 1][hero.x].condition = 1;
+                mvprintw(hero.character.y + 1, hero.character.x, "░");
+                screen[hero.character.y + 1][hero.character.x].condition = 1;
                 break;
             case 4:
-                mvprintw(hero.y, hero.x - 1, "░");
-                screen[hero.y][hero.x - 1].condition = 1;
+                mvprintw(hero.character.y, hero.character.x - 1, "░");
+                screen[hero.character.y][hero.character.x - 1].condition = 1;
                 break;
             default:
                 break;
@@ -1485,10 +2537,8 @@ void move_player() {
 
             // Show new room
             if (!strcmp(screen[new_y][new_x].symbol, "╬")) {
-                int reg = find_region_by_coordinate(new_y, new_x);
-                Region region = regions[reg / HORIZENTAL][reg % HORIZENTAL];
-                if (screen[region.room->y][region.room->x].condition == 0) {
-                    draw_room(region.room);
+                if (screen[room->y][room->x].condition == 0) {
+                    draw_room(room);
                 }
             }
         }
@@ -1508,13 +2558,14 @@ void new_game() {
 
     initialize_regions();
     connect_all_rooms();
-
     for (int i = 0; i < VERTICAL; i++) {
         for (int j = 0; j < HORIZENTAL; j++) {
             if (regions[i][j].room != NULL) {
-                add_room_stuff(regions[i][j].room);
+                create_room_map(regions[i][j].room);
 
-                set_room(regions[i][j].room);
+                create_room_in_screen(regions[i][j].room);
+
+                add_monsters(regions[i][j].room);
 
                 if (!strcmp(regions[i][j].room->kind, "start")) {
                     draw_room(regions[i][j].room);
@@ -1563,6 +2614,8 @@ int main() {
     init_pair(4, COLOR_RED, COLOR_BLACK);
     init_pair(5, COLOR_GREEN, COLOR_BLACK);
     init_pair(6, COLOR_BLUE, COLOR_BLACK);
+    init_pair(7, COLOR_CYAN, COLOR_BLACK);
+    init_pair(8, COLOR_MAGENTA, COLOR_BLACK);
 
     while (1) {
         // Main Menu

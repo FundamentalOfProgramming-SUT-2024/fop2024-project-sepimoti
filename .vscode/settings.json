@@ -1,6 +1,7 @@
 {
     "files.associations": {
-        "cjson.h": "c"
+        "cjson.h": "c",
+        "curses.h": "c"
     },
     "C_Cpp.errorSquiggles": "enabled"
 }
