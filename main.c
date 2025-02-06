@@ -26,6 +26,7 @@ typedef struct {
     int health;
     int damage;
     int can_follow;
+    int walk; // For giant and undeed to avoid walking after 5 blocks
     Character previous;
 } Monster;
 
@@ -44,6 +45,7 @@ typedef struct {
     Room *room;
 } Region;
 
+// Used to connect rooms
 typedef struct {
     int room1_idx;
     int room2_idx;
@@ -51,7 +53,7 @@ typedef struct {
 } Edge;
 
 int WIDTH, HEIGHT;
-const int HORIZENTAL = 4, VERTICAL = 3;
+const int HORIZONTAL = 4, VERTICAL = 3;
 Region regions[3][4]; // Divide screen into 12 regions
 int start_region;
 
@@ -283,30 +285,24 @@ int change_menu(const char *menu[], int len, int y, int x, int which_menu)
     }
 }
 
-int main_menu()
-{
-    // ROGUE
-    clear();
-    draw_border();
-    show_logo(0);
+void menu_clear() {
+    for (int y = 1; y < HEIGHT - 1; y++) {
+        for (int x = 1; x < WIDTH - 1; x++) {
+            mvprintw(y, x, " ");
+        }
+    }
+}
 
+int main_menu() {
+    // ROGUE
+    menu_clear();
+    show_logo(0);
+    
     // Footer
     attron(COLOR_PAIR(1) | A_BOLD);
     const char *footer = "Created by: SepiMoti | Version: 2.0.0";
     mvaddstr(HEIGHT - 1, (WIDTH - strlen(footer)) / 2, footer);
     attroff(COLOR_PAIR(1) | A_BOLD);
-
-    // Current user
-    if (current_user.name[0] != '\0')
-    {
-        char *message = (char *)calloc(100, sizeof(char));
-        strcat(message, "You are Logged In as ");
-        strcat(message, current_user.name);
-        show_message(message);
-        free(message);
-    }
-
-    refresh();
 
     // Menu
     const char *menu[] = {
@@ -903,17 +899,24 @@ void settings_page()
 
 void initialize_screen() {
     screen = (Screen **)calloc(HEIGHT, sizeof(Screen *));
-    for (int i = 0; i < WIDTH; i++) {
+    for (int i = 0; i < HEIGHT; i++) {
         screen[i] = (Screen *)calloc(WIDTH, sizeof(Screen));
     }
 }
 
+void free_screen() {
+    for (int i = 0; i < HEIGHT; i++) {
+        free(screen[i]);
+    }
+    free(screen);
+}
+
 int find_region(Room *room) {
     for (int i = 0; i < VERTICAL; i++) {
-        for (int j = 0; j < HORIZENTAL; j++) {
+        for (int j = 0; j < HORIZONTAL; j++) {
             if ((regions[i][j].first_x <= room->x) && (room->x <= regions[i][j].final_x) 
              && (regions[i][j].first_y <= room->y) && (room->y <= regions[i][j].final_y)) {
-                return i * HORIZENTAL + j;
+                return i * HORIZONTAL + j;
             }
         }
     }
@@ -921,22 +924,22 @@ int find_region(Room *room) {
 
 int find_region_by_coordinate(int y, int x) {
     for (int i = 0; i < VERTICAL; i++) {
-        for (int j = 0; j < HORIZENTAL; j++) {
+        for (int j = 0; j < HORIZONTAL; j++) {
             if ((regions[i][j].first_x <= x) && (x <= regions[i][j].final_x) 
              && (regions[i][j].first_y <= y) && (y <= regions[i][j].final_y)) {
-                return i * HORIZENTAL + j;
+                return i * HORIZONTAL + j;
             }
         }
     }
 }
 
 // Set the rooms in regions
-void room_condition_maker(int has_room[VERTICAL][HORIZENTAL]) {
+void room_condition_maker(int has_room[VERTICAL][HORIZONTAL]) {
     // At least we'll have 6 rooms but there is a chance to have up to 3 more rooms
 
     // Randomly set one of every two neighbor regions to 1
     for (int i = 0; i < VERTICAL; i++) {
-        for (int j = 0; j < HORIZENTAL; j += 2) {
+        for (int j = 0; j < HORIZONTAL; j += 2) {
             int random = rand() % 2;
             has_room[i][j + random] = 1;
             has_room[i][j + !random] = 0;
@@ -956,9 +959,9 @@ void room_condition_maker(int has_room[VERTICAL][HORIZENTAL]) {
     }
     // Apply the remaining chances
     for (int i = 0; i < more; i++) {
-        int random = rand() % (HORIZENTAL * VERTICAL);
-        int y = random / HORIZENTAL;
-        int x = random % HORIZENTAL;
+        int random = rand() % (HORIZONTAL * VERTICAL);
+        int y = random / HORIZONTAL;
+        int x = random % HORIZONTAL;
         if (has_room[y][x] == 0)
             has_room[y][x] = 1;
     }
@@ -987,14 +990,14 @@ void random_room_generator(Region *region) {
 }
 
 void initialize_regions() {
-    int x_sep = (WIDTH - 4) / HORIZENTAL;
+    int x_sep = (WIDTH - 4) / HORIZONTAL;
     int y_sep = (HEIGHT - 6) / VERTICAL;
 
-    int has_room[VERTICAL][HORIZENTAL];
+    int has_room[VERTICAL][HORIZONTAL];
     room_condition_maker(has_room);
 
     for (int i = 0; i < VERTICAL; i++) {
-        for (int j = 0; j < HORIZENTAL; j++) {
+        for (int j = 0; j < HORIZONTAL; j++) {
             regions[i][j].first_y = i * y_sep + 4;
             regions[i][j].first_x = j * x_sep + 2;
             regions[i][j].final_y = (i + 1) * y_sep + 2;
@@ -1031,7 +1034,7 @@ void draw_corridors(Room *room1, Room *room2) {
     int y1, x1; // Position of the door 1 in the screen
     int y2, x2; // Position of the door 2 in the screen
 
-    if ((position1 % HORIZENTAL) == (position2 % HORIZENTAL)) {
+    if ((position1 % HORIZONTAL) == (position2 % HORIZONTAL)) {
         // If two rooms are in same column they'll be connected on their up and down sides
         y1 = (position1 < position2) ? (room1->y + room1->height - 1) : (room1->y);
         x1 = (room1->x + 1) + rand() % (room1->width - 2);
@@ -1061,7 +1064,7 @@ void draw_corridors(Room *room1, Room *room2) {
             set_cor((min_y + (max_y - min_y) / 2), x);
         }
     }
-    else if ((position1 / HORIZENTAL) == (position2 / HORIZENTAL)) {
+    else if ((position1 / HORIZONTAL) == (position2 / HORIZONTAL)) {
         // If two rooms are in same row they'll be connected on their right and left sides
         y1 = (room1->y + 1) + rand() % (room1->height - 2);
         x1 = (position1 < position2) ? (room1->x + room1->width - 1) : room1->x;
@@ -1122,11 +1125,11 @@ int compare_edges(const void *a, const void *b) {
 
 void connect_all_rooms() {
     // Collect all rooms
-    Room *rooms[VERTICAL * HORIZENTAL];
+    Room *rooms[VERTICAL * HORIZONTAL];
     int room_count = 0;
 
     for (int i = 0; i < VERTICAL; i++) {
-        for (int j = 0; j < HORIZENTAL; j++) {
+        for (int j = 0; j < HORIZONTAL; j++) {
             if (regions[i][j].room != NULL) {
                 rooms[room_count++] = regions[i][j].room;
             }
@@ -1192,8 +1195,10 @@ void create_room_map(Room* room) {
     attr_t color;
     if (!strcmp(room->kind, "start")) 
         color = COLOR_PAIR(7);
-    else if(!strcmp(room->kind, "stair"))
+    else if (!strcmp(room->kind, "stair"))
         color = COLOR_PAIR(5);
+    else if (!strcmp(room->kind, "treasure"))
+        color = COLOR_PAIR(1);
     else
         color = COLOR_PAIR(3);
 
@@ -1225,6 +1230,17 @@ void create_room_map(Room* room) {
             update_room_map(room, y, room->width - 1, "║", color);
     }
 
+    // Add window
+    chance = (rand() % 5 == 0) ? 1 : 0;
+    while (chance != 0) {
+        int y = 1 + (rand() % (room->height - 2));
+        int x = (rand() % 2 == 0) ? 0 : (room->width - 1);
+        if (strcmp(room->map[y][x].symbol, "╬")) {
+            update_room_map(room, y, x, "◊", color);
+            chance--;
+        }
+    }
+
     // Add pillars
     int b = (room->height - 4) / 3;
     int a = (room->width  - 4) / 3;
@@ -1235,6 +1251,18 @@ void create_room_map(Room* room) {
                 int x = (2 + (3 * j)) + rand() % 3;
                 update_room_map(room, y, x, "■", color); 
             }
+        }
+    }
+
+    // Add stair
+    if (!strcmp(room->kind, "stair")) chance = 1;
+    while (chance != 0) {
+        int y = 2 + rand() % (room->height - 4);
+        int x = 2 + rand() % (room->width  - 4);
+
+        if (room->map[y][x].symbol[0] == '\0') {
+            update_room_map(room, y, x, "≡", COLOR_PAIR(5) | A_BOLD);
+            chance--;
         }
     }
     
@@ -1319,7 +1347,7 @@ void create_room_map(Room* room) {
     }
 
     // Add trap
-    chance = rand() % 2;
+    chance = (strcmp(room->kind, "treasure") == 0) ? 3 : (rand() % 2);
     while (chance != 0) {
         int y = 1 + rand() % (room->height - 2);
         int x = 1 + rand() % (room->width  - 2);
@@ -1395,6 +1423,7 @@ void init_giant(Room* room, int monster_index) {
     monster->health = 15;
     monster->damage = 10;
     monster->can_follow = 1;
+    monster->walk = 0;
 }
 
 void init_snake(Room* room, int monster_index) {
@@ -1419,6 +1448,7 @@ void init_undeed(Room* room, int monster_index) {
     monster->health = 30;
     monster->damage = 20;
     monster->can_follow = 1;
+    monster->walk = 0;
 }
 
 void set_monster(Room* room, int monster_index) {
@@ -1429,6 +1459,9 @@ void set_monster(Room* room, int monster_index) {
         if (!is_there_monster(room, y, x) && strcmp(room->map[y - room->y][x - room->x].symbol, "■")) {
             monster->character.y = y;
             monster->character.x = x;
+
+            monster->previous.y = y;
+            monster->previous.x = x;
 
             // Set previous map index of the monster
             strcpy(monster->previous.symbol, room->map[y - room->y][x - room->x].symbol);
@@ -1452,6 +1485,24 @@ void add_monsters(Room* room) {
         init_demon(room, 0);
         set_monster(room, 0);
         room->monster_count++;
+        return;
+    } else if (!strcmp(room->kind, "start")) {
+        init_undeed(room, 0);
+        set_monster(room, 0);
+
+        init_snake(room, 1);
+        set_monster(room, 1);
+
+        init_snake(room, 2);
+        set_monster(room, 2);
+
+        init_undeed(room, 3);
+        set_monster(room, 3);
+
+        init_giant(room, 4);
+        set_monster(room, 4);
+
+        room->monster_count = 5;
         return;
     }
 
@@ -1547,7 +1598,7 @@ void init_hero() {
         hero.character.attributes = COLOR_PAIR(6);
 
     // Position
-    Region start = regions[start_region / HORIZENTAL][start_region % HORIZENTAL];
+    Region start = regions[start_region / HORIZONTAL][start_region % HORIZONTAL];
     hero.character.y = start.room->y + 1;
     hero.character.x = start.room->x + 1;
 
@@ -1952,7 +2003,7 @@ void earn_food(Room* room, int new_y, int new_x, int which_food) {
 
 void delete_all_swords() {
     for (int i = 0; i < VERTICAL; i++) {
-        for (int j = 0; j < HORIZENTAL; j++) {
+        for (int j = 0; j < HORIZONTAL; j++) {
             Room* room = regions[i][j].room;
             if (room != NULL) {
                 for (int y = 1; y < room->height - 1; y++) {
@@ -2110,7 +2161,8 @@ void show_screen(int condition) {
 
 // For hero
 int is_walkable(int y, int x) {
-    if (screen[y][x].symbol[0] == '\0') return 0;
+    if (!strcmp(screen[y][x].symbol, "◊")) return -1;
+    else if (screen[y][x].symbol[0] == '\0') return 0;
 
     return ((screen[y][x].symbol[0] != 'D') && (screen[y][x].symbol[0] != 'F')
          && (screen[y][x].symbol[0] != 'G') && (screen[y][x].symbol[0] != 'S')
@@ -2120,7 +2172,18 @@ int is_walkable(int y, int x) {
          && strcmp(screen[y][x].symbol, "╝") && strcmp(screen[y][x].symbol, "╚"));
 }
 
-// For shhowing new corridors
+// For monsters
+int is_walkable_monster(int y, int x) {
+    if (screen[y][x].symbol[0] == '\0') return 0;
+
+    return (strcmp(screen[y][x].symbol, hero.character.symbol)
+         && strcmp(screen[y][x].symbol, "■") && strcmp(screen[y][x].symbol, "◊")
+         && strcmp(screen[y][x].symbol, "║") && strcmp(screen[y][x].symbol, "═")
+         && strcmp(screen[y][x].symbol, "╔") && strcmp(screen[y][x].symbol, "╗")
+         && strcmp(screen[y][x].symbol, "╝") && strcmp(screen[y][x].symbol, "╚"));
+}
+
+// For showing new corridors
 int is_there_corridor(int y, int x) {
     if (!strcmp(screen[y - 1][x].symbol, "░") && !screen[y - 1][x].condition) return 1;
     if (!strcmp(screen[y][x + 1].symbol, "░") && !screen[y][x + 1].condition) return 2;
@@ -2167,7 +2230,7 @@ void attack_monster(Monster* monster, int which_weapon) {
         }
     } else {
         char message[60];
-        sprintf(message, "You killed %s", monster->name);
+        sprintf(message, "You killed the %s", monster->name);
         show_message(message);
         
         int y = monster->character.y;
@@ -2256,7 +2319,7 @@ void use_long_range(Room* room, int which) {
 
 void use_weapon() {
     int reg = find_region_by_coordinate(hero.character.y, hero.character.x);
-    Room* room = regions[reg / HORIZENTAL][reg % HORIZENTAL].room;
+    Room* room = regions[reg / HORIZONTAL][reg % HORIZONTAL].room;
 
     switch (hero.inventory.which_weapon) {
     case 0: 
@@ -2308,18 +2371,278 @@ void game_over(int over_code) {
     case 1:
         mvprintw(13, (WIDTH - 22) / 2, "YOU STEPPED ON A TRAP!");
         break;
+    case 2:
+        mvprintw(13, (WIDTH - 29) / 2, "YOU WERE KILLED BY THE DEMON!");
+        break;
+    case 3:
+        mvprintw(13, (WIDTH - 46) / 2, "YOU WERE KILLED BY THE FIRE BREATHING MONSTER!");
+        break;
+    case 4:
+        mvprintw(13, (WIDTH - 29) / 2, "YOU WERE KILLED BY THE GIANT!");
+        break;
+    case 5:
+        mvprintw(13, (WIDTH - 29) / 2, "YOU WERE KILLED BY THE SNAKE!");
+        break;
+    case 6:
+        mvprintw(13, (WIDTH - 30) / 2, "YOU WERE KILLED BY THE UNDEED!");
+        break;
     }
     attroff(COLOR_PAIR(5));
 
     attron(COLOR_PAIR(1));
-    mvprintw(15, (WIDTH - 28) / 2, "[Press ENTER to continue...]");
+    mvprintw(15, (WIDTH - 26) / 2, "Press ENTER to continue...");
     attroff(COLOR_PAIR(1));
 
     refresh();
 
+    free_screen();
+
     int ch = getch();
     while (ch != '\n') ch = getch();
     curs_set(FALSE);
+}
+
+int save_regions(FILE *file) {
+    for (int i = 0; i < VERTICAL; i++) {
+        for (int j = 0; j < HORIZONTAL; j++) {
+            Region *reg = &regions[i][j];
+
+            // Save basic Region data
+            fwrite(&reg->first_x, sizeof(int), 1, file);
+            fwrite(&reg->first_y, sizeof(int), 1, file);
+            fwrite(&reg->final_x, sizeof(int), 1, file);
+            fwrite(&reg->final_y, sizeof(int), 1, file);
+
+            // Check if room exists and save flag
+            int has_room = (reg->room != NULL) ? 1 : 0;
+            fwrite(&has_room, sizeof(int), 1, file);
+
+            if (has_room) {
+                Room *room = reg->room;
+
+                // Save Room data
+                fwrite(room, sizeof(Room), 1, file);
+
+                // Save map
+                for (int y = 0; y < room->height; y++) {
+                    fwrite(room->map[y], sizeof(Character), room->width, file);
+                }
+            }
+        }
+    }
+    return 1;
+}
+
+int save_game(const char* filename) {
+    FILE* file = fopen(filename, "wb");
+    if (!file) {
+        perror("Failed to open file for saving");
+        return 0;
+    }
+
+    // Save HEIGHT and WIDTH
+    fwrite(&HEIGHT, sizeof(int), 1, file);
+    fwrite(&WIDTH, sizeof(int), 1, file);
+
+    // Save Hero
+    fwrite(&hero, sizeof(Hero), 1, file);
+
+    // Save previous Character
+    fwrite(&previous, sizeof(Character), 1, file);
+
+    // Save Regions
+    save_regions(file);
+
+    // Save start_region
+    fwrite(&start_region, sizeof(int), 1, file);
+
+    // Save Screen
+    for (int i = 0; i < HEIGHT; i++) {
+        for (int j = 0; j < WIDTH; j++) {
+            fwrite(&screen[i][j], sizeof(Screen), 1, file);
+        }
+    }
+    free_screen();
+
+    fclose(file);
+
+    return 1;
+}
+
+int save_bar() {
+    clear_inventory_bar();
+    int max_width = (WIDTH - 4) - 84;
+
+    const char* menu[] = {
+        "EXIT",
+        "SAVE & EXIT"
+    };
+
+    int which = 0;
+    int ch = 0;
+    while (1) {
+        move(2, 84 + (max_width - 27) / 2);
+        for (int i = 0; i < 2; i++) {
+            if (i == which) {
+                attron(COLOR_PAIR(2) | A_BOLD);
+                printw("<< %s >>", menu[i]);
+                attroff(COLOR_PAIR(2) | A_BOLD);
+            }
+            else {
+                attron(COLOR_PAIR(3) | A_BOLD);
+                printw("   %s   ", menu[i]);
+                attroff(COLOR_PAIR(3) | A_BOLD);
+            }
+        }
+        refresh();
+
+        ch = getch();
+        if (ch == 27) {
+            show_inventory(0);
+            return -1;
+        }
+        else if (ch == KEY_RIGHT || ch == 'd') 
+            which = (which + 1) % 2;
+        else if (ch == KEY_LEFT || ch == 'a')
+            which = (which - 1 + 2) % 2;
+        else if (ch == '\n') {
+            switch (which) {
+            case 0:
+                return 0;
+            case 1: {
+                char file[55];
+                sprintf(file, "%s.dat", current_user.name);
+                return save_game(file);
+            }
+            }
+        }
+    }
+}
+
+int is_hero_in_room(Room* room) {
+    if (!room) return 0;
+
+    int y1 = room->y;
+    int y2 = room->y + room->height - 1;
+
+    int x1 = room->x;
+    int x2 = room->x + room->width - 1;
+
+    return ((y1 < hero.character.y) && (hero.character.y < y2)
+         && (x1 < hero.character.x) && (hero.character.x < x2));
+}
+
+void move_monster(Monster* monster) {
+    int dy = monster->character.y - hero.character.y;
+    int dx = monster->character.x - hero.character.x;
+
+    int new_y = monster->character.y;
+    int new_x = monster->character.x;
+
+    if ((dy > 1) && is_walkable_monster(new_y - 1, new_x)) {
+        new_y--;
+    } else if ((dy < -1) && is_walkable_monster(new_y + 1, new_x)) {
+        new_y++;
+    }
+
+    if ((dx > 1) && is_walkable_monster(new_y, new_x - 1)) {
+        new_x--;
+    } else if ((dx < -1) && is_walkable_monster(new_y, new_x + 1)) {
+        new_x++;
+    }
+
+    // Giant and Undeed stop following the hero after the mentioned block
+    if ((new_y != monster->character.y) || (new_x != monster->character.x)) {
+        if ((monster->character.symbol[0] == 'G') && (++monster->walk == 10)) {
+            monster->can_follow = 0;
+        } else if ((monster->character.symbol[0] == 'U') && (++monster->walk == 10)) {
+            monster->can_follow = 0;
+        }
+    }
+
+    // Draw previous
+    Character p = monster->previous;
+    attron(p.attributes);
+    mvprintw(p.y, p.x, "%s", p.symbol);
+    attroff(p.attributes);
+    update_room_in_screen(p.y, p.x, p.symbol, p.attributes);
+    // Update the location
+    monster->previous.y = new_y;
+    monster->previous.x = new_x;
+
+    // Draw monster
+    Character c = monster->character;
+    attron(c.attributes);
+    mvprintw(new_y, new_x, "%s", c.symbol);
+    attroff(c.attributes);
+    update_room_in_screen(new_y, new_x, c.symbol, c.attributes);
+    // Update the location
+    monster->character.y = new_y;
+    monster->character.x = new_x;
+
+    refresh();
+}
+
+int monster_attacks(Monster* monster) {
+    int dy = monster->character.y - hero.character.y;
+    int dx = monster->character.x - hero.character.x;
+
+    if (((dy == 1) || (dy == -1))
+     && ((dx == 1) || (dx == -1))) {
+        hero.health -= monster->damage;
+        printf("\a");
+
+        if (hero.health > 0) {
+            char message[75];
+            sprintf(message, "The %s hit you! Press any key to continue...", monster->name);
+            show_message(message);
+            getch();
+        } else {
+            switch (monster->character.symbol[0]) {
+            case 'D':
+                game_over(2);
+                return -1;
+            case 'F':
+                game_over(3);
+                return -1;
+            case 'G':
+                game_over(4);
+                return -1;
+            case 'S':
+                game_over(5);
+                return -1;
+            case 'U':
+                game_over(6);
+                return -1;
+            }
+        }
+
+        show_health();
+    }
+
+    return 1;
+}
+
+int process_monster() {
+    int reg = find_region_by_coordinate(hero.character.y, hero.character.x);
+    Room* room = regions[reg / HORIZONTAL][reg % HORIZONTAL].room;
+    if (!room) return 0;
+
+    if (is_hero_in_room(room)) {
+        for (int i = 0; i < room->monster_count; i++) {
+            if (room->monsters[i].health <= 0) continue;
+
+            Monster* monster = &room->monsters[i];
+            if (monster->can_follow) {
+                move_monster(monster);
+            }
+            if(monster_attacks(monster) == -1) {
+                return -1;
+            }
+        }
+    }
+    
+    return 1;
 }
 
 void game_win() {
@@ -2342,6 +2665,31 @@ void game_win() {
     int ch = getch();
     while (ch != '\n') ch = getch();
     curs_set(FALSE);
+
+    char filename[60];
+    sprintf(filename, "%s.dat", current_user.name);
+    if (file_exists(filename)) remove(filename);
+}
+
+int use_stair() {
+    show_message("Press ENTER to end the game");
+    int ch = getch();
+    if (ch != '\n') return 0;
+
+    for (int i = 0; i < VERTICAL; i++) {
+        for (int j = 0; j < HORIZONTAL; j++) {
+            if (regions[i][j].room != NULL) {
+                Room* room = regions[i][j].room;
+                for (int k = 0; k < room->monster_count; k++) {
+                    if (room->monsters[k].health > 0) {
+                        return -1;
+                    }
+                }
+            }
+        }
+    }
+    game_win();
+    return 1;
 }
 
 void move_player() {
@@ -2350,7 +2698,10 @@ void move_player() {
     while (1) {
         int ch = getchar();
 
-        if (ch == 27) return;
+        if (ch == 27) {
+            if (save_bar() == -1) continue;
+            return;
+        }
         else if (ch == 'm') {
             show_map = !show_map;
             show_screen(show_map);
@@ -2378,14 +2729,34 @@ void move_player() {
             case 'e': temp_y--; temp_x++; break; // Up-right
             case 'z': temp_y++; temp_x--; break; // Down-left
             case 'c': temp_y++; temp_x++; break; // Down-right
-            case 27: return; // Exit loop
             default:
                 show_message("Invalid Input!");
                 break;
             }
 
             if (ch == 'm' || ch == 'i') break;
-            if (!is_walkable(temp_y, temp_x)) break;
+
+            // Find current room
+            int reg = find_region_by_coordinate(temp_y, temp_x);
+            Room* room = regions[reg / HORIZONTAL][reg % HORIZONTAL].room;
+
+            int condition = is_walkable(temp_y, temp_x);
+            if (condition == -1) { // Apply window
+                int ver = reg / HORIZONTAL;
+                int hor = reg % HORIZONTAL;
+                while (1) {
+                    if (temp_x == room->x) hor--;
+                    else hor++;
+
+                    if ((0 <= hor) && (hor <= 3)) {
+                        if (regions[ver][hor].room != NULL) {
+                            draw_room(regions[ver][hor].room);
+                            break;
+                        }
+                    } else break;
+                }
+                break;
+            } else if (!condition) break;
 
             new_y = temp_y;
             new_x = temp_x;
@@ -2462,9 +2833,13 @@ void move_player() {
                 show_message("The damage potion effect has gone!");
             }
 
-            // Find current room
-            int reg = find_region_by_coordinate(new_y, new_x);
-            Room* room = regions[reg / HORIZENTAL][reg % HORIZENTAL].room;
+            // Check for stair
+            if (!strcmp(previous.symbol, "≡")) {
+                if (use_stair() == 1) return;
+                else {
+                    show_message("There are still alive monsters!");
+                }
+            }
 
             // Check for trap
             if (!strcmp(previous.symbol, ".")) {
@@ -2542,6 +2917,8 @@ void move_player() {
                 }
             }
         }
+
+        if (process_monster() == -1) return;
     }
 }
 
@@ -2559,7 +2936,7 @@ void new_game() {
     initialize_regions();
     connect_all_rooms();
     for (int i = 0; i < VERTICAL; i++) {
-        for (int j = 0; j < HORIZENTAL; j++) {
+        for (int j = 0; j < HORIZONTAL; j++) {
             if (regions[i][j].room != NULL) {
                 create_room_map(regions[i][j].room);
 
@@ -2578,6 +2955,85 @@ void new_game() {
     guide();
 
     move_player();
+}
+
+void load_regions(FILE *file) {
+    for (int i = 0; i < VERTICAL; i++) {
+        for (int j = 0; j < HORIZONTAL; j++) {
+            Region *reg = &regions[i][j];
+
+            // Load Region data
+            fread(&reg->first_x, sizeof(int), 1, file);
+            fread(&reg->first_y, sizeof(int), 1, file);
+            fread(&reg->final_x, sizeof(int), 1, file);
+            fread(&reg->final_y, sizeof(int), 1, file);
+
+            // Check if room exists
+            int has_room;
+            fread(&has_room, sizeof(int), 1, file);
+
+            if (has_room) {
+                // Allocate memory for room
+                reg->room = (Room *)malloc(sizeof(Room));
+                fread(reg->room, sizeof(Room), 1, file);
+
+                Room *room = reg->room;
+
+                // Allocate memory for map
+                room->map = (Character **)malloc(room->height * sizeof(Character *));
+                for (int y = 0; y < room->height; y++) {
+                    room->map[y] = (Character *)malloc(room->width * sizeof(Character));
+                    fread(room->map[y], sizeof(Character), room->width, file);
+                }
+            } else {
+                reg->room = NULL;
+            }
+        }
+    }
+}
+
+int load_game(const char* filename) {
+    if (!file_exists(filename)) return 0;
+
+    FILE* file = fopen(filename, "rb");
+    if (!file) return -1;
+
+    int h, w;
+    fread(&h, sizeof(int), 1, file);
+    fread(&w, sizeof(int), 1, file);
+    if ((h != HEIGHT) || (w != WIDTH)) {
+        fclose(file);
+        return -2;
+    }
+
+    fread(&hero, sizeof(Hero), 1, file);
+    fread(&previous, sizeof(Character), 1, file);
+
+    load_regions(file);
+
+    fread(&start_region, sizeof(int), 1, file);
+
+    // Load Screen
+    initialize_screen();
+    for (int i = 0; i < HEIGHT; i++) {
+        for (int j = 0; j < WIDTH; j++) {
+            fread(&screen[i][j], sizeof(Screen), 1, file);
+        }
+    }
+
+    fclose(file);
+
+    clear();
+    show_message("Welcome Back!");
+
+    draw_border();
+    draw_table(1, WIDTH - 2, 1, 3);
+    show_screen(0);    
+
+    guide();
+    move_player();
+
+    return 1;
 }
 
 int main() {
@@ -2617,6 +3073,14 @@ int main() {
     init_pair(7, COLOR_CYAN, COLOR_BLACK);
     init_pair(8, COLOR_MAGENTA, COLOR_BLACK);
 
+    draw_border();
+    // Current user
+    if (current_user.name[0] != '\0') {
+        char message[75];
+        sprintf(message, "You are Logged In as %s", current_user.name);
+        show_message(message);
+    }
+
     while (1) {
         // Main Menu
         int page = main_menu();
@@ -2645,7 +3109,19 @@ int main() {
             new_game();
         }
         else if (page == 3) { // Load Game
-            show_message("You have selected page 3");
+            char file[55];
+            sprintf(file, "%s.dat", current_user.name);
+            switch (load_game(file)) {
+            case 0:
+                show_message("You don't have any saved game yet.");
+                break;
+            case -1:
+                show_message("Failed to load the saved game!");
+                break;
+            case -2:
+                show_message("Please resize your terminal to the previous size.");
+                break;
+            }
         }
         else if (page == 4) { // Settings
             settings_page();
